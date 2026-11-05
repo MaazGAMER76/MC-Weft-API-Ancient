@@ -346,6 +346,13 @@ fn make_dist(root: &std::path::Path, out: &std::path::Path) -> Result<(), String
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     std::fs::copy(&exe, out.join(exe.file_name().unwrap())).map_err(|e| e.to_string())?;
+    let run = out.join("run");
+    std::fs::create_dir_all(run.join("config")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(run.join("logs")).map_err(|e| e.to_string())?;
+    let renderer_config = run.join("config").join("render.toml");
+    if !renderer_config.exists() {
+        std::fs::write(&renderer_config, "renderer = \"cpu\"\n").map_err(|e| e.to_string())?;
+    }
     copy_dir(&root.join("crates").join("engine").join("assets"), &out.join("assets").join("core"))?;
     for dir in subdirs(&root.join("mods")) {
         // Development tools (the test kit) mark themselves `dist = false` in Cargo.toml.
