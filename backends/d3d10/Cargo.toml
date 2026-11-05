@@ -1,0 +1,7 @@
+[package]
+name = "weft_backend_d3d10"
+version = "26.11.1"
+edition = "2021"
+[dependencies]
+weft_render = { path = "../../crates/render" }
+raw-window-handle = "0.6"

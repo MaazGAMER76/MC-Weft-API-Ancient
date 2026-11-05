@@ -1,0 +1,4 @@
+# MAAZXOS / Ironlake DEV_0046 Compatible
+# renderer = "d3d10" # RECOMMENDED for Vostro 3300 - DDI 10 FL 10_0
+# Options: vulkan, dx12, d3d10, gl21, cpu
+renderer = "d3d10"

@@ -305,17 +305,21 @@ pub struct GpuTerrain {
 impl GpuTerrain {
     pub fn new(gpu: &mut dyn Backend, assets: &crate::assets::Assets, rx: Receiver<Job>, on: Arc<AtomicBool>) -> GpuTerrain {
         // Not a shader packs may replace: it has to make the CPU's blocks exactly.
-        let pipelines = crate::packs::engine_shader(assets, "terrain.wgsl", &layout::prelude())
-            .map_err(|e| e.0)
-            .and_then(|s| {
-                let terrain = gpu
-                    .create_compute(&ComputeDesc { label: "terrain", shader: &s, entry: "generate" })
-                    .map_err(|e| e.0)?;
-                let lod = gpu
-                    .create_compute(&ComputeDesc { label: "terrain lod", shader: &s, entry: "lod" })
-                    .map_err(|e| e.0)?;
-                Ok((terrain, lod))
-            });
+        let pipelines = if gpu.supports_compute() {
+            crate::packs::engine_shader(assets, "terrain.wgsl", &layout::prelude())
+                .map_err(|e| e.0)
+                .and_then(|s| {
+                    let terrain = gpu
+                        .create_compute(&ComputeDesc { label: "terrain", shader: &s, entry: "generate" })
+                        .map_err(|e| e.0)?;
+                    let lod = gpu
+                        .create_compute(&ComputeDesc { label: "terrain lod", shader: &s, entry: "lod" })
+                        .map_err(|e| e.0)?;
+                    Ok((terrain, lod))
+                })
+        } else {
+            Err("backend does not support compute; using CPU terrain generation".to_string())
+        };
         let (pipeline, lod_pipeline) = match pipelines {
             Ok((p, l)) => (Some(p), Some(l)),
             Err(e) => {

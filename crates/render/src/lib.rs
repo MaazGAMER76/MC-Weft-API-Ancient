@@ -10,6 +10,58 @@ pub use shader::{BufferKind, Shader, ShaderError};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Renderer {
+    Vulkan,
+    DirectX12,
+    DirectX10,
+    OpenGl21,
+    Cpu,
+}
+
+impl Renderer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Vulkan => "vulkan",
+            Self::DirectX12 => "dx12",
+            Self::DirectX10 => "d3d10",
+            Self::OpenGl21 => "gl21",
+            Self::Cpu => "cpu",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "vulkan" => Some(Self::Vulkan),
+            "dx12" => Some(Self::DirectX12),
+            "d3d10" => Some(Self::DirectX10),
+            "gl21" => Some(Self::OpenGl21),
+            "cpu" => Some(Self::Cpu),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    use super::Renderer;
+
+    #[test]
+    fn renderer_names_round_trip() {
+        for (name, renderer) in [
+            ("vulkan", Renderer::Vulkan),
+            ("dx12", Renderer::DirectX12),
+            ("d3d10", Renderer::DirectX10),
+            ("gl21", Renderer::OpenGl21),
+            ("cpu", Renderer::Cpu),
+        ] {
+            assert_eq!(Renderer::parse(name), Some(renderer));
+            assert_eq!(renderer.as_str(), name);
+        }
+        assert_eq!(Renderer::parse("opengl"), None);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BufferId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -289,11 +341,11 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub trait Window: HasWindowHandle + HasDisplayHandle {}
-impl<T: HasWindowHandle + HasDisplayHandle> Window for T {}
+pub trait Window: HasWindowHandle + HasDisplayHandle + Send + Sync {}
+impl<T: HasWindowHandle + HasDisplayHandle + Send + Sync> Window for T {}
 
-pub struct BackendDesc<'a> {
-    pub window: &'a dyn Window,
+pub struct BackendDesc {
+    pub window: std::sync::Arc<dyn Window>,
     pub width: u32,
     pub height: u32,
     pub vsync: bool,
@@ -302,6 +354,9 @@ pub struct BackendDesc<'a> {
 
 pub trait Backend: Send {
     fn name(&self) -> &str;
+    fn supports_compute(&self) -> bool {
+        true
+    }
     /// The GPU in use, for diagnostics.
     fn device_name(&self) -> &str {
         ""

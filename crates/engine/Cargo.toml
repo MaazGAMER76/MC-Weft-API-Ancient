@@ -26,6 +26,7 @@ zip.workspace = true
 kira.workspace = true
 serde_json.workspace = true
 mimalloc.workspace = true
+softbuffer.workspace = true
 
 [dev-dependencies]
 naga.workspace = true

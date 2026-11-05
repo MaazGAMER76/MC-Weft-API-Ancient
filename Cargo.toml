@@ -15,6 +15,9 @@ weft_noise = { path = "crates/noise" }
 weft_render = { path = "crates/render" }
 weft_engine = { path = "crates/engine" }
 weft_vulkan = { path = "backends/vulkan" }
+weft_backend_opengl21 = { path = "backends/opengl21" }
+weft_backend_d3d10 = { path = "backends/d3d10" }
+weft_backend_cpu = { path = "backends/cpu" }
 base_api = { path = "mods/base/api" }
 
 ash = "0.38"
@@ -41,6 +44,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 kira = { version = "0.12.5", default-features = false, features = ["cpal", "wav", "pcm", "ogg", "vorbis"] }
 serde_json = "1"
 mimalloc = { version = "0.1", default-features = false }
+softbuffer = "0.4"
+toml = "1.1"
 
 [profile.dev]
 opt-level = 1

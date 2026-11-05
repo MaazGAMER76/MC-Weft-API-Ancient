@@ -1,0 +1,9 @@
+[package]
+name = "weft_backend_cpu"
+version = "26.11.1"
+edition = "2021"
+[dependencies]
+weft_render = { path = "../../crates/render" }
+raw-window-handle = "0.6"
+softbuffer = "0.4"
+tiny-skia = "0.11"

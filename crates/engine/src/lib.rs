@@ -31,6 +31,7 @@ pub mod physics;
 pub mod post;
 pub mod refs;
 pub mod registry;
+mod renderer_select;
 pub mod saves;
 pub mod screens;
 pub mod server;

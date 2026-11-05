@@ -6,9 +6,20 @@ license.workspace = true
 
 [dependencies]
 weft_engine.workspace = true
-weft_vulkan.workspace = true
+weft_vulkan = { workspace = true, optional = true }
+weft_backend_opengl21 = { workspace = true, optional = true }
+weft_backend_d3d10 = { workspace = true, optional = true }
+weft_backend_cpu = { workspace = true, optional = true }
 weft_render.workspace = true
 log.workspace = true
+toml.workspace = true
+
+[features]
+default = ["renderer-vulkan", "renderer-cpu"]
+renderer-vulkan = ["dep:weft_vulkan"]
+renderer-gl21 = ["dep:weft_backend_opengl21"]
+renderer-d3d10 = ["dep:weft_backend_d3d10"]
+renderer-cpu = ["dep:weft_backend_cpu"]
 
 [build-dependencies]
 winresource = "0.1"

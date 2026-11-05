@@ -2,13 +2,55 @@ use std::path::PathBuf;
 
 use weft_engine::Options;
 use weft_engine::paths::{self, Dirs};
-use weft_render::{Backend, BackendDesc, Error};
+use weft_render::{Backend, BackendDesc, Error, Renderer};
 
 #[global_allocator]
 static ALLOC: weft_engine::diag::CountingAlloc = weft_engine::diag::CountingAlloc;
 
-fn vulkan(desc: &BackendDesc) -> Result<Box<dyn Backend>, Error> {
-    Ok(Box::new(weft_vulkan::VulkanBackend::new(desc)?))
+fn backend(renderer: Renderer, desc: &BackendDesc) -> Result<Box<dyn Backend>, Error> {
+    match renderer {
+        Renderer::Vulkan => {
+            #[cfg(feature = "renderer-vulkan")]
+            {
+                Ok(Box::new(weft_vulkan::VulkanBackend::new(desc)?))
+            }
+            #[cfg(not(feature = "renderer-vulkan"))]
+            {
+                Err(Error("Vulkan renderer was not enabled at build time".into()))
+            }
+        }
+        Renderer::OpenGl21 => {
+            #[cfg(feature = "renderer-gl21")]
+            {
+                Ok(Box::new(weft_backend_opengl21::Gl21Backend::new(desc)?))
+            }
+            #[cfg(not(feature = "renderer-gl21"))]
+            {
+                Err(Error("OpenGL 2.1 renderer was not enabled at build time".into()))
+            }
+        }
+        Renderer::DirectX10 => {
+            #[cfg(feature = "renderer-d3d10")]
+            {
+                Ok(Box::new(weft_backend_d3d10::D3d10Backend::new(desc)?))
+            }
+            #[cfg(not(feature = "renderer-d3d10"))]
+            {
+                Err(Error("Direct3D 10 renderer was not enabled at build time".into()))
+            }
+        }
+        Renderer::Cpu => {
+            #[cfg(feature = "renderer-cpu")]
+            {
+                Ok(Box::new(weft_backend_cpu::CpuBackend::new(desc)?))
+            }
+            #[cfg(not(feature = "renderer-cpu"))]
+            {
+                Err(Error("CPU renderer was not enabled at build time".into()))
+            }
+        }
+        Renderer::DirectX12 => Err(Error("Direct3D 12 renderer is not implemented".into())),
+    }
 }
 
 /// Where `run` (and, in the source tree, `mods`) live: the working directory if it has either,
@@ -44,6 +86,9 @@ fn main() {
         automated: false,
         no_vsync: false,
         view: None,
+        renderer: None,
+        render_select: false,
+        renderer_config: PathBuf::new(),
     };
     let mut chosen_run: Option<PathBuf> = None;
     let mut verbose = false;
@@ -65,6 +110,15 @@ fn main() {
             "--world" => opts.world = Some(value()),
             "--seed" => opts.seed = value().parse().ok(),
             "--screen" => opts.screen = Some(value()),
+            "--render" => {
+                let selected = value();
+                opts.renderer = Renderer::parse(&selected);
+                if opts.renderer.is_none() {
+                    eprintln!("unknown renderer {selected}; expected vulkan, dx12, d3d10, gl21, or cpu");
+                    std::process::exit(2);
+                }
+            }
+            "--render-select" => opts.render_select = true,
             "--no-vsync" => opts.no_vsync = true,
             "--server" => server = true,
             // Engine shaders and assets live from the source tree in a release build too.
@@ -89,6 +143,15 @@ fn main() {
     }
     let dirs = chosen_run.map_or_else(|| paths::of_install(&root), |run| Dirs::under(&run));
     (opts.run_dir, opts.cache_dir) = (dirs.data, dirs.cache);
+    opts.renderer_config = dirs.config.join("render.toml");
+    if opts.renderer.is_none() {
+        opts.renderer = read_renderer_config(&opts.renderer_config).filter(|renderer| matches!(renderer, Renderer::Vulkan | Renderer::Cpu));
+        if !server && (opts.render_select || opts.renderer.is_none()) {
+            opts.render_select = true;
+        }
+    } else {
+        opts.render_select = false;
+    }
     paths::set_config(dirs.config);
     opts.automated = extra.iter().any(|(k, _)| k == "script" || k == "test");
     if let Some(code) = test_jobs(&extra, &opts.run_dir) {
@@ -141,11 +204,17 @@ fn main() {
         }
         return;
     }
-    if let Err(e) = weft_engine::run(vulkan, opts) {
+    if let Err(e) = weft_engine::run(backend, opts) {
         log::error!("{e}");
         std::process::exit(1);
     }
     std::process::exit(weft_engine::exit_code());
+}
+
+fn read_renderer_config(path: &std::path::Path) -> Option<Renderer> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let config: toml::Value = toml::from_str(&text).ok()?;
+    Renderer::parse(config.get("renderer")?.as_str()?)
 }
 
 /// `--test all` runs in several processes at once, each with its own run folder (`--jobs N`, 1 for

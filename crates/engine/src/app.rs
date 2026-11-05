@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use glam::Vec2;
 use weft_abi as abi;
-use weft_render::{Backend, BackendDesc, Cmd, CommandList, Format, Target, TextureDesc, TextureId};
+use weft_render::{Backend, BackendDesc, Cmd, CommandList, Format, Renderer, Target, TextureDesc, TextureId};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -21,6 +21,7 @@ use crate::hud::Hud;
 use crate::input::{Input, Key};
 use crate::modloader::{self, LoadedMod};
 use crate::net;
+use crate::renderer_select::RendererSelector;
 use crate::saves::{self, WorldMeta};
 use crate::screens::{self, BuildCx, Screen};
 use crate::server::{self, ServerConfig, ServerHandle};
@@ -31,7 +32,7 @@ use crate::ui::render::UiRenderer;
 use crate::ui::text::{self, Arg, Msg};
 use crate::ui::{Kind, Ui};
 
-pub type BackendFactory = fn(&BackendDesc) -> Result<Box<dyn Backend>, weft_render::Error>;
+pub type BackendFactory = fn(Renderer, &BackendDesc) -> Result<Box<dyn Backend>, weft_render::Error>;
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -51,6 +52,9 @@ pub struct Options {
     /// Benchmarks: force vsync off / a view distance without touching saved settings.
     pub no_vsync: bool,
     pub view: Option<i32>,
+    pub renderer: Option<Renderer>,
+    pub render_select: bool,
+    pub renderer_config: PathBuf,
 }
 
 pub enum Request {
@@ -256,13 +260,14 @@ struct App {
     factory: BackendFactory,
     opts: Options,
     run: Option<Running>,
+    selector: Option<RendererSelector>,
     error: Option<String>,
 }
 
 pub fn run(factory: BackendFactory, opts: Options) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App { factory, opts, run: None, error: None };
+    let mut app = App { factory, opts, run: None, selector: None, error: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     match app.error {
         Some(e) => Err(e),
@@ -350,13 +355,17 @@ impl App {
         }
         let window = Arc::new(el.create_window(attrs).map_err(|e| e.to_string())?);
         let size = window.inner_size();
-        let mut gpu = (self.factory)(&BackendDesc {
-            window: &*window,
-            width: size.width,
-            height: size.height,
-            vsync: settings.vsync(),
-            debug: self.opts.gpu_debug,
-        })
+        let renderer = self.opts.renderer.unwrap_or(Renderer::Vulkan);
+        let mut gpu = (self.factory)(
+            renderer,
+            &BackendDesc {
+                window: window.clone(),
+                width: size.width,
+                height: size.height,
+                vsync: settings.vsync(),
+                debug: self.opts.gpu_debug,
+            },
+        )
         .map_err(|e| e.to_string())?;
 
         let mut roots: Vec<(String, PathBuf)> = vec![("core".into(), engine_assets(self.opts.dev))];
@@ -1449,7 +1458,20 @@ fn text_condition(name: &str, client: Option<&Client>, debug: bool, dev: bool) -
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.run.is_some() {
+        if self.run.is_some() || self.selector.is_some() {
+            return;
+        }
+        if self.opts.render_select || self.opts.renderer.is_none() {
+            match RendererSelector::new(el) {
+                Ok(selector) => {
+                    selector.request_redraw();
+                    self.selector = Some(selector);
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                    el.exit();
+                }
+            }
             return;
         }
         match self.start(el) {
@@ -1469,7 +1491,33 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self
+            .selector
+            .as_ref()
+            .is_some_and(|selector| selector.id() == id)
+        {
+            let selected = self
+                .selector
+                .as_mut()
+                .and_then(|selector| selector.event(&event));
+            if let Some(renderer) = selected {
+                self.selector.take();
+                self.opts.renderer = Some(renderer);
+                self.opts.render_select = false;
+                if let Err(error) = save_renderer_config(&self.opts.renderer_config, renderer) {
+                    log::warn!("cannot save renderer choice: {error}");
+                }
+                match self.start(el) {
+                    Ok(r) => self.run = Some(r),
+                    Err(error) => {
+                        self.error = Some(error);
+                        el.exit();
+                    }
+                }
+            }
+            return;
+        }
         let Some(r) = &mut self.run else { return };
         match event {
             WindowEvent::CloseRequested => r.quit = true,
@@ -1537,18 +1585,28 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
-        if let Some(r) = &self.run {
+        if let Some(selector) = &self.selector {
+            selector.request_redraw();
+        } else if let Some(r) = &self.run {
             r.window.request_redraw();
         }
     }
 
     fn exiting(&mut self, _el: &ActiveEventLoop) {
+        self.selector.take();
         if let Some(mut r) = self.run.take() {
             r.gpu.wait_idle();
             r.leave_world_silent();
             drop(r.gpu);
         }
     }
+}
+
+fn save_renderer_config(path: &std::path::Path, renderer: Renderer) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, format!("renderer = \"{}\"\n", renderer.as_str()))
 }
 
 /// What a widget does, run once the screen's `Ui` is let go.

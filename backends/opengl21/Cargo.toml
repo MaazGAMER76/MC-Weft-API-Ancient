@@ -1,0 +1,8 @@
+[package]
+name = "weft_backend_opengl21"
+version = "26.11.1"
+edition = "2021"
+[dependencies]
+weft_render = { path = "../../crates/render" }
+raw-window-handle = "0.6"
+glow = "0.12"
