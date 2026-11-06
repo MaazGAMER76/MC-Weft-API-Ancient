@@ -4,11 +4,17 @@ use std::sync::Arc;
 
 use softbuffer::{Context, Surface};
 use weft_render::{
-    Backend, BackendDesc, BufferId, Capture, Cmd, CommandList, ComputeDesc, Error, FrameInfo, PipelineDesc, PipelineId, Target,
-    TextureDesc, TextureId, Window,
+    Backend, BackendDesc, BufferId, Capture, CommandList, ComputeDesc, Error, FrameInfo, PipelineDesc, PipelineId, TextureDesc, TextureId,
+    Window,
 };
 
 type CpuSurface = Surface<Arc<dyn Window>, Arc<dyn Window>>;
+
+/// The upper half of every CPU frame: sky blue.
+const SKY: (u8, u8, u8) = (0x87, 0xCE, 0xEB);
+/// The lower half: green. Two colours rather than one, so a frame that reached the screen proves
+/// more than a single flat clear would.
+const GRASS: (u8, u8, u8) = (0x22, 0x8B, 0x22);
 
 struct CpuTexture {
     desc: TextureDesc,
@@ -69,19 +75,12 @@ impl CpuBackend {
         total
     }
 
-    fn surface_clear(cmds: &CommandList) -> [f32; 4] {
-        cmds.cmds
-            .iter()
-            .rev()
-            .find_map(|cmd| match cmd {
-                Cmd::BeginPass { color: Some((Target::Surface, Some(color))), .. } => Some(*color),
-                _ => None,
-            })
-            .unwrap_or([0.025, 0.035, 0.05, 1.0])
-    }
-
-    fn channel(value: f32) -> u8 {
-        (value.clamp(0.0, 1.0) * 255.0).round() as u8
+    fn pixel(y: u32, height: u32) -> (u8, u8, u8) {
+        if y < height / 2 {
+            SKY
+        } else {
+            GRASS
+        }
     }
 }
 
@@ -95,7 +94,7 @@ impl Backend for CpuBackend {
     }
 
     fn device_name(&self) -> &str {
-        "CPU Softbuffer Fallback - i3 M380 4GB - Ironlake DEV_0046"
+        "CPU softbuffer - Ironlake DEV_0046 fallback, presents a sky/green frame, draws no geometry"
     }
 
     fn frames_in_flight(&self) -> usize {
@@ -196,18 +195,14 @@ impl Backend for CpuBackend {
         Some(FrameInfo { width: self.width, height: self.height, slot: 0 })
     }
 
-    fn end_frame(&mut self, cmds: &CommandList) {
-        let [red, green, blue, _] = Self::surface_clear(cmds).map(Self::channel);
-        let pixel = (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue);
+    fn end_frame(&mut self, _cmds: &CommandList) {
+        let (width, height) = (self.width, self.height);
         let mut rgba = Vec::new();
-        let Ok(pixel_count) = usize::try_from(self.width).and_then(|w| usize::try_from(self.height).map(|h| w.saturating_mul(h))) else {
+        let Ok(pixel_count) = usize::try_from(width).and_then(|w| usize::try_from(height).map(|h| w.saturating_mul(h))) else {
             return;
         };
         if self.capture_requested {
             rgba.reserve(pixel_count.saturating_mul(4));
-            for _ in 0..pixel_count {
-                rgba.extend_from_slice(&[red, green, blue, 255]);
-            }
         }
         let mut buffer = match self.surface.buffer_mut() {
             Ok(buffer) => buffer,
@@ -216,15 +211,24 @@ impl Backend for CpuBackend {
                 return;
             }
         };
-        for dst in buffer.iter_mut() {
-            *dst = pixel;
+        for (row, chunk) in buffer.chunks_mut(width.max(1) as usize).enumerate() {
+            let (red, green, blue) = Self::pixel(row as u32, height);
+            let pixel = (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue);
+            for dst in &mut *chunk {
+                *dst = pixel;
+            }
+            if self.capture_requested {
+                for _ in 0..chunk.len() {
+                    rgba.extend_from_slice(&[red, green, blue, 255]);
+                }
+            }
         }
         if let Err(error) = buffer.present() {
             eprintln!("CPU renderer: {error}");
             return;
         }
         if self.capture_requested {
-            self.capture = Some(Capture { width: self.width, height: self.height, rgba });
+            self.capture = Some(Capture { width, height, rgba });
             self.capture_requested = false;
         }
     }

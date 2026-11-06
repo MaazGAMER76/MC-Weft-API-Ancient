@@ -5,3 +5,19 @@ edition = "2021"
 [dependencies]
 weft_render = { path = "../../crates/render" }
 raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D10",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+# The examples drive a real window through the backend, which is how the present path gets
+# checked on actual Ironlake hardware without building the whole game.
+[target.'cfg(windows)'.dev-dependencies]
+winit = "0.30"
+# hlsl-out lets the examples answer "can these shaders be lowered for this GPU?" with evidence.
+naga = { version = "30", features = ["wgsl-in", "hlsl-out"] }

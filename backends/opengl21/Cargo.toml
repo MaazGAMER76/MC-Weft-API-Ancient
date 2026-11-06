@@ -5,4 +5,15 @@ edition = "2021"
 [dependencies]
 weft_render = { path = "../../crates/render" }
 raw-window-handle = "0.6"
-glow = "0.12"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_OpenGL",
+] }
+
+# The examples drive a real window through the backend, which is how the present path gets
+# checked on actual Ironlake hardware without building the whole game.
+[target.'cfg(windows)'.dev-dependencies]
+winit = "0.30"

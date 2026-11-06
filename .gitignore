@@ -2,3 +2,6 @@ target/
 /dist/
 /run*
 /.idea
+# Built game folder handed to players; GitHub rejects the 100MB+ binary in it anyway.
+/Game/
+weft-ironlake-windows.zip

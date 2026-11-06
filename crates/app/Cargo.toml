@@ -15,7 +15,7 @@ log.workspace = true
 toml.workspace = true
 
 [features]
-default = ["renderer-vulkan", "renderer-cpu"]
+default = ["renderer-vulkan", "renderer-d3d10", "renderer-gl21", "renderer-cpu"]
 renderer-vulkan = ["dep:weft_vulkan"]
 renderer-gl21 = ["dep:weft_backend_opengl21"]
 renderer-d3d10 = ["dep:weft_backend_d3d10"]

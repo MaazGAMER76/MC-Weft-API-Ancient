@@ -355,18 +355,45 @@ impl App {
         }
         let window = Arc::new(el.create_window(attrs).map_err(|e| e.to_string())?);
         let size = window.inner_size();
-        let renderer = self.opts.renderer.unwrap_or(Renderer::Vulkan);
-        let mut gpu = (self.factory)(
-            renderer,
-            &BackendDesc {
-                window: window.clone(),
-                width: size.width,
-                height: size.height,
-                vsync: settings.vsync(),
-                debug: self.opts.gpu_debug,
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        let requested = self.opts.renderer.unwrap_or(Renderer::Vulkan);
+        let desc = BackendDesc {
+            window: window.clone(),
+            width: size.width,
+            height: size.height,
+            vsync: settings.vsync(),
+            debug: self.opts.gpu_debug,
+        };
+        // A machine that cannot open the chosen renderer should still show a window rather than
+        // die on the first failed backend: everything down to the software path is tried, in order.
+        let mut order = vec![requested];
+        for fallback in [Renderer::DirectX10, Renderer::OpenGl21, Renderer::Cpu] {
+            if !order.contains(&fallback) {
+                order.push(fallback);
+            }
+        }
+        let mut gpu = None;
+        let mut problems = Vec::new();
+        for renderer in &order {
+            match (self.factory)(*renderer, &desc) {
+                Ok(backend) => {
+                    if *renderer != requested {
+                        log::warn!(
+                            "{} renderer unavailable ({}); falling back to {}",
+                            requested.as_str(),
+                            problems.join("; "),
+                            renderer.as_str()
+                        );
+                    }
+                    gpu = Some(backend);
+                    break;
+                }
+                Err(error) => {
+                    log::warn!("{} renderer: {error}", renderer.as_str());
+                    problems.push(format!("{}: {error}", renderer.as_str()));
+                }
+            }
+        }
+        let mut gpu = gpu.ok_or_else(|| format!("no renderer could start: {}", problems.join("; ")))?;
 
         let mut roots: Vec<(String, PathBuf)> = vec![("core".into(), engine_assets(self.opts.dev))];
         roots.extend(mods.iter().map(|m| (m.id.clone(), m.assets.clone())));

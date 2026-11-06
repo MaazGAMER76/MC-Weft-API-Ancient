@@ -145,7 +145,7 @@ fn main() {
     (opts.run_dir, opts.cache_dir) = (dirs.data, dirs.cache);
     opts.renderer_config = dirs.config.join("render.toml");
     if opts.renderer.is_none() {
-        opts.renderer = read_renderer_config(&opts.renderer_config).filter(|renderer| matches!(renderer, Renderer::Vulkan | Renderer::Cpu));
+        opts.renderer = read_renderer_config(&opts.renderer_config);
         if !server && (opts.render_select || opts.renderer.is_none()) {
             opts.render_select = true;
         }
@@ -351,7 +351,9 @@ fn make_dist(root: &std::path::Path, out: &std::path::Path) -> Result<(), String
     std::fs::create_dir_all(run.join("logs")).map_err(|e| e.to_string())?;
     let renderer_config = run.join("config").join("render.toml");
     if !renderer_config.exists() {
-        std::fs::write(&renderer_config, "renderer = \"cpu\"\n").map_err(|e| e.to_string())?;
+        // Vulkan where it exists, and the startup fallback chain (d3d10, gl21, cpu) everywhere
+        // else, so one build serves both a 2010 Ironlake laptop and a current card.
+        std::fs::write(&renderer_config, "renderer = \"vulkan\"\n").map_err(|e| e.to_string())?;
     }
     copy_dir(&root.join("crates").join("engine").join("assets"), &out.join("assets").join("core"))?;
     for dir in subdirs(&root.join("mods")) {

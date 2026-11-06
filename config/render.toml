@@ -1,4 +1,11 @@
-# MAAZXOS / Ironlake DEV_0046 Compatible
-# renderer = "d3d10" # RECOMMENDED for Vostro 3300 - DDI 10 FL 10_0
-# Options: vulkan, dx12, d3d10, gl21, cpu
+# Which renderer to start with. Options: vulkan, dx12, d3d10, gl21, cpu.
+# A renderer that cannot start is reported in the log and the next one down is tried, so a wrong
+# value here costs a warning rather than a black window.
+#
+# Ironlake DEV_0046 (Vostro 3300, i3 M380) has no Vulkan driver. The three paths it can run today
+# all clear the window without rasterising the world, so none of them is playable yet:
+#   d3d10 - hardware clear presented through DXGI 1.0 at feature level 10_0, verified on this GPU
+#   gl21  - hardware clear presented through WGL SwapBuffers, OpenGL 2.1
+#   cpu   - software frame written through softbuffer: sky blue above, green below
+# A Vulkan-capable machine should ask for vulkan here.
 renderer = "d3d10"

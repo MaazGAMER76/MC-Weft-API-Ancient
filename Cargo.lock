@@ -1461,18 +1461,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glow"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca0fe580e4b60a8ab24a868bc08e2f03cbcb20d3d676601fa909386713333728"
-dependencies = [
- "js-sys",
- "slotmap",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
 name = "gpu-allocator"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5251,17 +5239,21 @@ dependencies = [
 name = "weft_backend_d3d10"
 version = "26.11.1"
 dependencies = [
+ "naga",
  "raw-window-handle",
  "weft_render",
+ "windows",
+ "winit",
 ]
 
 [[package]]
 name = "weft_backend_opengl21"
 version = "26.11.1"
 dependencies = [
- "glow",
  "raw-window-handle",
  "weft_render",
+ "windows",
+ "winit",
 ]
 
 [[package]]

@@ -16,6 +16,41 @@ pub(crate) struct RendererSelector {
     cursor: (f64, f64),
 }
 
+/// One line of the list. `None` in `renderer` means the row is only a statement about the
+/// hardware, not a choice: Ironlake has no Vulkan or DX12 driver, and no GL2.1 backend exists.
+/// Both selectable rows clear the window to the pass colour but rasterise nothing, and the
+/// labels say so rather than promising a game.
+struct Row {
+    label: &'static str,
+    renderer: Option<Renderer>,
+    recommended: bool,
+}
+
+const ROWS: [Row; 5] = [
+    Row { label: "1 VULKAN - NOT AVAILABLE", renderer: None, recommended: false },
+    Row { label: "2 DX12 - NOT AVAILABLE", renderer: None, recommended: false },
+    Row { label: "3 D3D10 - GPU CLEAR ONLY", renderer: Some(Renderer::DirectX10), recommended: true },
+    Row { label: "4 GL21 - GPU CLEAR ONLY", renderer: Some(Renderer::OpenGl21), recommended: false },
+    Row { label: "5 CPU - SKY AND GREEN FRAME", renderer: Some(Renderer::Cpu), recommended: false },
+];
+
+const ROW_TOP: u32 = 55;
+const ROW_STEP: u32 = 33;
+const ROW_HEIGHT: u32 = 27;
+
+fn row_at(y: f64) -> Option<usize> {
+    (0..ROWS.len()).find(|&i| {
+        let top = ROW_TOP as f64 + i as f64 * ROW_STEP as f64;
+        y >= top && y < top + ROW_HEIGHT as f64
+    })
+}
+
+fn default_choice() -> Option<Renderer> {
+    ROWS.iter()
+        .find(|row| row.recommended)
+        .and_then(|row| row.renderer)
+}
+
 impl RendererSelector {
     pub(crate) fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
         let window = Arc::new(
@@ -60,13 +95,17 @@ impl RendererSelector {
                 self.cursor = (position.x, position.y);
                 None
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }
-                if (185.0..225.0).contains(&self.cursor.1) =>
-            {
-                Some(Renderer::Cpu)
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                row_at(self.cursor.1).and_then(|row| ROWS[row].renderer)
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => match event.physical_key {
-                PhysicalKey::Code(KeyCode::Digit5 | KeyCode::Enter | KeyCode::Space | KeyCode::Escape) => Some(Renderer::Cpu),
+                PhysicalKey::Code(KeyCode::Digit1) => ROWS[0].renderer,
+                PhysicalKey::Code(KeyCode::Digit2) => ROWS[1].renderer,
+                PhysicalKey::Code(KeyCode::Digit3) => ROWS[2].renderer,
+                PhysicalKey::Code(KeyCode::Digit4) => ROWS[3].renderer,
+                PhysicalKey::Code(KeyCode::Digit5) => ROWS[4].renderer,
+                PhysicalKey::Code(KeyCode::Enter | KeyCode::Space) => default_choice(),
+                PhysicalKey::Code(KeyCode::Escape) => Some(Renderer::Cpu),
                 _ => None,
             },
             WindowEvent::RedrawRequested => {
@@ -86,20 +125,18 @@ impl RendererSelector {
         fill_rect(&mut buffer, width, height, 12, 12, width.saturating_sub(24), 34, rgb(29, 42, 50));
         text(&mut buffer, width, height, 23, 22, "WHICH RENDER?", 2, rgb(238, 242, 240));
 
-        let rows = [
-            ("1 VULKAN - DISABLED", rgb(58, 64, 68), rgb(145, 151, 153)),
-            ("2 DX12 - DISABLED", rgb(58, 64, 68), rgb(145, 151, 153)),
-            ("3 D3D10 - NOT READY", rgb(58, 64, 68), rgb(145, 151, 153)),
-            ("4 GL21 - NOT READY", rgb(58, 64, 68), rgb(145, 151, 153)),
-            ("5 CPU - RECOMMENDED", rgb(34, 91, 73), rgb(235, 248, 239)),
-        ];
-        for (index, (label, background, foreground)) in rows.into_iter().enumerate() {
-            let y = 55 + index as u32 * 33;
-            fill_rect(&mut buffer, width, height, 16, y, width.saturating_sub(32), 27, background);
-            text(&mut buffer, width, height, 25, y + 7, label, 2, foreground);
+        for (index, row) in ROWS.iter().enumerate() {
+            let y = ROW_TOP + index as u32 * ROW_STEP;
+            let (background, foreground) = match (row.renderer, row.recommended) {
+                (Some(_), true) => (rgb(34, 91, 73), rgb(235, 248, 239)),
+                (Some(_), false) => (rgb(24, 57, 84), rgb(224, 239, 251)),
+                (None, _) => (rgb(58, 64, 68), rgb(145, 151, 153)),
+            };
+            fill_rect(&mut buffer, width, height, 16, y, width.saturating_sub(32), ROW_HEIGHT, background);
+            text(&mut buffer, width, height, 25, y + 7, row.label, 2, foreground);
         }
-        text(&mut buffer, width, height, 17, 235, "CPU SOFTWARE PRESENT", 1, rgb(196, 209, 207));
-        text(&mut buffer, width, height, 17, 253, "CLICK CPU OR PRESS 5", 1, rgb(196, 209, 207));
+        text(&mut buffer, width, height, 17, 235, "CLICK A ROW OR PRESS ENTER", 1, rgb(196, 209, 207));
+        text(&mut buffer, width, height, 17, 253, "GPU ROWS CLEAR ONLY - CPU SHOWS A TEST FRAME", 1, rgb(206, 176, 120));
         if let Err(error) = buffer.present() {
             eprintln!("renderer selector: {error}");
         }
