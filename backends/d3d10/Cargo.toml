@@ -16,9 +16,12 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
 ] }
 
+# hlsl-out lets the examples answer "can these shaders be lowered for this GPU?" with evidence.
+# naga is cross-platform, so the lowering example builds on any host, not just Windows.
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in", "hlsl-out"] }
+
 # The examples drive a real window through the backend, which is how the present path gets
 # checked on actual Ironlake hardware without building the whole game.
 [target.'cfg(windows)'.dev-dependencies]
 winit = "0.30"
-# hlsl-out lets the examples answer "can these shaders be lowered for this GPU?" with evidence.
-naga = { version = "30", features = ["wgsl-in", "hlsl-out"] }
