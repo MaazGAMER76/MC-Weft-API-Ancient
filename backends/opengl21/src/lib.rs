@@ -2,7 +2,11 @@
 //! renderer reports itself unavailable so the app can fall back instead of failing to build.
 
 #[cfg(windows)]
+mod gl;
+#[cfg(windows)]
 mod gl21;
+#[cfg(windows)]
+mod world;
 
 #[cfg(not(windows))]
 mod unavailable;

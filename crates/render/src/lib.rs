@@ -4,8 +4,14 @@
 //! global bindless table (group 0), per-draw buffers are group 1, small per-draw data may go
 //! through push constants (`var<immediate>`). Shaders are WGSL, prefixed with [`PRELUDE`].
 
+mod atlas;
+/// The legacy backends decode face records with these bit constants on the CPU, and the engine's
+/// own test cross-checks them against the shader, so it has to be reachable from outside.
+pub mod mesh;
 mod shader;
 
+pub use atlas::{Atlas, Rect, TooBig};
+pub use mesh::{AO, Cam, Draw, F32S_PER_VERTEX, Geometry, Kind, Resolve, SHADE, UVS};
 pub use shader::{BufferKind, Shader, ShaderError};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};

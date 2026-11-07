@@ -1,13 +1,9 @@
 //! Direct3D 10 (feature level 10_0) backend: the API level the Ironlake driver actually
 //! implements, with no Vulkan, DX11 or shader-model-5 dependencies.
 //!
-//! Implemented: hardware device and swap chain at 10_0, render target and depth views, viewport
-//! and scissor, clears, presentation, resize, and CPU readback for screenshots.
-//!
-//! Not implemented: draw execution. `create_pipeline` accepts pipelines but no command reaches
-//! the GPU, so a frame presents only the pass clear colour. Shading the engine's WGSL means
-//! lowering the bindless `binding_array<texture_2d<f32>, 65536>` table to something SM 4.0 can
-//! express, which is a separate step.
+//! Hardware device and swap chain at 10_0, render target and depth views, viewport and scissor,
+//! clears, presentation, resize, and CPU readback for screenshots. World records use the same
+//! CPU decoding and texture atlas as the OpenGL 2.1 backend, drawn with HLSL 4.0 shaders.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -33,6 +29,8 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_SWAP_EFFECT_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 
+use crate::world::World;
+
 pub struct D3d10Backend {
     device: ID3D10Device,
     swapchain: IDXGISwapChain,
@@ -47,8 +45,11 @@ pub struct D3d10Backend {
     /// Last clear colour seen on a surface pass. The UI pass clears with `None`, and presenting
     /// black there is indistinguishable from a dead renderer.
     clear: [f32; 4],
+    world: World,
     buffers: HashMap<BufferId, Vec<u8>>,
+    next_buffer: u32,
     textures: HashMap<TextureId, TextureDesc>,
+    next_texture: u32,
     capture_requested: bool,
     capture: Option<Capture>,
 }
@@ -107,6 +108,7 @@ impl D3d10Backend {
         let device = device.ok_or_else(|| Error("Direct3D 10 returned no device".into()))?;
         let swapchain = swapchain.ok_or_else(|| Error("Direct3D 10 returned no swap chain".into()))?;
         let adapter = adapter_name(&swapchain);
+        let world = World::new(device.clone()).map_err(|e| Error(format!("D3D10 renderer: {e}")))?;
         let mut this = Self {
             device,
             swapchain,
@@ -119,8 +121,11 @@ impl D3d10Backend {
             clear: SKY,
             depth_tex: None,
             depth: None,
+            world,
             buffers: HashMap::new(),
+            next_buffer: 1,
             textures: HashMap::new(),
+            next_texture: 1,
             capture_requested: false,
             capture: None,
         };
@@ -309,7 +314,8 @@ impl Backend for D3d10Backend {
     }
 
     fn create_buffer(&mut self, size: u64, _usage: u32, _label: &str) -> BufferId {
-        let id = BufferId(self.buffers.len() as u32 + 1);
+        let id = BufferId(self.next_buffer);
+        self.next_buffer += 1;
         self.buffers
             .insert(id, vec![0; usize::try_from(size).unwrap_or(0)]);
         id
@@ -336,12 +342,21 @@ impl Backend for D3d10Backend {
     }
 
     fn create_texture(&mut self, desc: &TextureDesc, _label: &str) -> TextureId {
-        let id = TextureId(self.textures.len() as u32 + 1);
+        let id = TextureId(self.next_texture);
+        self.next_texture += 1;
         self.textures.insert(id, desc.clone());
         id
     }
 
-    fn write_texture(&mut self, _texture: TextureId, _mip: u32, _data: &[u8]) {}
+    fn write_texture(&mut self, texture: TextureId, mip: u32, data: &[u8]) {
+        if mip != 0 {
+            return;
+        }
+        let Some(desc) = self.textures.get(&texture) else { return };
+        if let Err(error) = self.world.texture(texture.0, desc.width, desc.height, data) {
+            eprintln!("D3D10 renderer: {error}");
+        }
+    }
 
     fn texture_index(&self, texture: TextureId) -> u32 {
         texture.0
@@ -349,17 +364,20 @@ impl Backend for D3d10Backend {
 
     fn destroy_texture(&mut self, texture: TextureId) {
         self.textures.remove(&texture);
+        self.world.remove_texture(texture.0);
     }
 
-    fn create_pipeline(&mut self, _desc: &PipelineDesc<'_>) -> Result<PipelineId, Error> {
-        Ok(PipelineId(0))
+    fn create_pipeline(&mut self, desc: &PipelineDesc<'_>) -> Result<PipelineId, Error> {
+        Ok(self.world.pipeline(desc))
     }
 
     fn create_compute(&mut self, _desc: &ComputeDesc<'_>) -> Result<PipelineId, Error> {
         Err(Error("Direct3D 10 has no compute shaders; the engine falls back to CPU terrain".into()))
     }
 
-    fn destroy_pipeline(&mut self, _pipeline: PipelineId) {}
+    fn destroy_pipeline(&mut self, pipeline: PipelineId) {
+        self.world.destroy_pipeline(pipeline);
+    }
 
     fn begin_frame(&mut self) -> Option<FrameInfo> {
         Some(FrameInfo { width: self.width, height: self.height, slot: 0 })
@@ -374,7 +392,7 @@ impl Backend for D3d10Backend {
             self.device
                 .ClearRenderTargetView(self.color.as_ref(), &self.clear);
             self.device
-                .ClearDepthStencilView(self.depth.as_ref(), (D3D10_CLEAR_DEPTH.0 | D3D10_CLEAR_STENCIL.0) as u32, 1.0, 0);
+                .ClearDepthStencilView(self.depth.as_ref(), (D3D10_CLEAR_DEPTH.0 | D3D10_CLEAR_STENCIL.0) as u32, 0.0, 0);
             self.device.RSSetViewports(Some(&[D3D10_VIEWPORT {
                 TopLeftX: 0,
                 TopLeftY: 0,
@@ -385,6 +403,7 @@ impl Backend for D3d10Backend {
             }]));
             self.device
                 .RSSetScissorRects(Some(&[RECT { left: 0, top: 0, right: self.width as i32, bottom: self.height as i32 }]));
+            self.world.draw(cmds, &self.buffers, self.width, self.height, self.color.as_ref(), self.depth.as_ref());
             if self.capture_requested {
                 self.capture_now();
             }

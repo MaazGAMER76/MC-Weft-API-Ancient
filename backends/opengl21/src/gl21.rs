@@ -1,15 +1,7 @@
 //! OpenGL 2.1 (the highest GL level the Ironlake driver exposes) backend, built on the plain
 //! Windows GL API: no Vulkan, DX11 or shader-model-5 dependency anywhere.
 //!
-//! Implemented: a real WGL context on the window, viewport, clears, `SwapBuffers` presentation,
-//! resize, GL back-buffer readback for screenshots, and the adapter description.
-//!
-//! Not implemented: draw execution, and frame pacing (the swap-control extension is not loaded),
-//! so the driver decides when `SwapBuffers` returns. `create_pipeline` accepts pipelines but no
-//! geometry reaches the GPU, so a frame shows only the pass clear colour (sky blue when the
-//! engine asked for none). Shading the engine's WGSL means lowering the bindless
-//! `binding_array<texture_2d<f32>, 65536>` table to something GLSL 120 can express, which is a
-//! separate step.
+//! World records use CPU decoding and a texture atlas instead of bindless WGSL.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -28,6 +20,9 @@ use windows::Win32::Graphics::OpenGL::{
     PIXELFORMATDESCRIPTOR,
 };
 
+use crate::gl::{self, Gl};
+use crate::world::World;
+
 const SKY: [f32; 4] = [0.53, 0.81, 0.92, 1.0];
 
 pub struct Gl21Backend {
@@ -38,8 +33,11 @@ pub struct Gl21Backend {
     height: u32,
     adapter: String,
     clear: [f32; 4],
+    world: World,
     buffers: HashMap<BufferId, Vec<u8>>,
+    next_buffer: u32,
     textures: HashMap<TextureId, TextureDesc>,
+    next_texture: u32,
     capture_requested: bool,
     capture: Option<Capture>,
 }
@@ -91,6 +89,20 @@ impl Gl21Backend {
         unsafe { wglMakeCurrent(hdc, context) }.map_err(|e| Error(format!("making the WGL context current: {e}")))?;
         let (version, renderer) = (text(GL_VERSION), text(GL_RENDERER));
         let adapter = format!("OpenGL {version} - {renderer}");
+        let world = Gl::load()
+            .map_err(|e| Error(format!("GL21 entry points: {e}")))
+            .and_then(|gl| World::new(gl).map_err(|e| Error(format!("GL21 renderer: {e}"))));
+        let world = match world {
+            Ok(world) => world,
+            Err(error) => {
+                unsafe {
+                    let _ = wglMakeCurrent(hdc, HGLRC(std::ptr::null_mut()));
+                    let _ = wglDeleteContext(context);
+                    ReleaseDC(Some(hwnd), hdc);
+                }
+                return Err(error);
+            }
+        };
         Ok(Self {
             hwnd,
             hdc,
@@ -99,8 +111,11 @@ impl Gl21Backend {
             height: desc.height.max(1),
             adapter,
             clear: SKY,
+            world,
             buffers: HashMap::new(),
+            next_buffer: 1,
             textures: HashMap::new(),
+            next_texture: 1,
             capture_requested: false,
             capture: None,
         })
@@ -148,6 +163,10 @@ fn text(name: u32) -> String {
 impl Drop for Gl21Backend {
     fn drop(&mut self) {
         unsafe {
+            if wglGetCurrentContext() != self.context {
+                let _ = wglMakeCurrent(self.hdc, self.context);
+            }
+            self.world.destroy();
             if wglGetCurrentContext() == self.context {
                 let _ = wglMakeCurrent(self.hdc, HGLRC(std::ptr::null_mut()));
             }
@@ -184,12 +203,15 @@ impl Backend for Gl21Backend {
         self.height = height.max(1);
     }
 
-    fn set_vsync(&mut self, _vsync: bool) {
-        // WGL needs the swap-control extension to honour this; without it the driver decides.
+    fn set_vsync(&mut self, vsync: bool) {
+        if !gl::swap_interval(vsync) {
+            eprintln!("GL21 renderer: no WGL swap control; the driver decides vsync");
+        }
     }
 
     fn create_buffer(&mut self, size: u64, _usage: u32, _label: &str) -> BufferId {
-        let id = BufferId(self.buffers.len() as u32 + 1);
+        let id = BufferId(self.next_buffer);
+        self.next_buffer += 1;
         self.buffers
             .insert(id, vec![0; usize::try_from(size).unwrap_or(0)]);
         id
@@ -216,12 +238,23 @@ impl Backend for Gl21Backend {
     }
 
     fn create_texture(&mut self, desc: &TextureDesc, _label: &str) -> TextureId {
-        let id = TextureId(self.textures.len() as u32 + 1);
+        let id = TextureId(self.next_texture);
+        self.next_texture += 1;
         self.textures.insert(id, desc.clone());
         id
     }
 
-    fn write_texture(&mut self, _texture: TextureId, _mip: u32, _data: &[u8]) {}
+    fn write_texture(&mut self, texture: TextureId, mip: u32, data: &[u8]) {
+        // One sheet, no mip chain: the nearest filter keeps block textures crisp.
+        if mip != 0 {
+            return;
+        }
+        let Some(desc) = self.textures.get(&texture) else { return };
+        let (width, height) = (desc.width, desc.height);
+        if let Err(error) = self.world.texture(texture.0, width, height, data) {
+            eprintln!("GL21 renderer: {error}");
+        }
+    }
 
     fn texture_index(&self, texture: TextureId) -> u32 {
         texture.0
@@ -229,17 +262,20 @@ impl Backend for Gl21Backend {
 
     fn destroy_texture(&mut self, texture: TextureId) {
         self.textures.remove(&texture);
+        self.world.remove_texture(texture.0);
     }
 
-    fn create_pipeline(&mut self, _desc: &PipelineDesc<'_>) -> Result<PipelineId, Error> {
-        Ok(PipelineId(0))
+    fn create_pipeline(&mut self, desc: &PipelineDesc<'_>) -> Result<PipelineId, Error> {
+        Ok(self.world.pipeline(desc))
     }
 
     fn create_compute(&mut self, _desc: &ComputeDesc<'_>) -> Result<PipelineId, Error> {
         Err(Error("OpenGL 2.1 has no compute shaders; the engine falls back to CPU terrain".into()))
     }
 
-    fn destroy_pipeline(&mut self, _pipeline: PipelineId) {}
+    fn destroy_pipeline(&mut self, pipeline: PipelineId) {
+        self.world.destroy_pipeline(pipeline);
+    }
 
     fn begin_frame(&mut self) -> Option<FrameInfo> {
         // A WGL context belongs to one thread at a time, so re-assert it every frame.
@@ -258,9 +294,10 @@ impl Backend for Gl21Backend {
             glViewport(0, 0, self.width as i32, self.height as i32);
             glClearColor(self.clear[0], self.clear[1], self.clear[2], self.clear[3]);
             glClear(GL_COLOR_BUFFER_BIT);
-            if self.capture_requested {
-                self.capture_now();
-            }
+        }
+        self.world.draw(cmds, &self.buffers, self.width, self.height);
+        if self.capture_requested {
+            self.capture_now();
         }
         if let Err(error) = unsafe { SwapBuffers(self.hdc) } {
             eprintln!("GL21 renderer: swap: {error:?}");

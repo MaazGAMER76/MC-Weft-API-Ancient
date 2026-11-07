@@ -1,0 +1,9 @@
+# First visual check of the D3D10 world path on Ironlake (feature level 10_0, HLSL 4.0).
+loaded
+wait 3
+shot d3d10-terrain.png
+look 45 -15
+wait 1
+shot d3d10-turned.png
+bench 5 d3d10-terrain
+quit

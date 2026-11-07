@@ -3,6 +3,8 @@
 
 #[cfg(windows)]
 mod dx10;
+#[cfg(windows)]
+mod world;
 
 #[cfg(not(windows))]
 mod unavailable;

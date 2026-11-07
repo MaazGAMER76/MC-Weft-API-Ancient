@@ -1,0 +1,9 @@
+# First visual check of the GL 2.1 world path on Ironlake.
+loaded
+wait 3
+shot gl21-terrain.png
+look 45 -15
+wait 1
+shot gl21-turned.png
+bench 5 gl21-terrain
+quit

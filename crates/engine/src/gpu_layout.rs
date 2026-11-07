@@ -942,6 +942,166 @@ mod tests {
             .expect("records validate");
     }
 
+    /// The legacy backends decode these records on the CPU with a copy of the constants above
+    /// (`weft_render::mesh`), because they cannot run the shaders that read them on the GPU. This
+    /// is what keeps that copy honest: the fields, and the tables the shader multiplies by.
+    #[test]
+    fn legacy_decode_matches_the_shader() {
+        use weft_render::mesh as m;
+        assert_eq!(
+            [
+                m::bits::POS_MASK, m::bits::Y_SHIFT, m::bits::Z_SHIFT, m::bits::DIR_SHIFT, m::bits::DIR_MASK, m::bits::AO_SHIFT,
+                m::bits::AO_MASK, m::bits::TINT_SHIFT, m::bits::TEX_MASK, m::bits::BIOME_SHIFT, m::bits::LIGHT_MASK,
+                m::bits::CORNER_SHIFT,
+            ],
+            [
+                face::POS_MASK, face::Y_SHIFT, face::Z_SHIFT, face::DIR_SHIFT, face::DIR_MASK, face::AO_SHIFT, face::AO_MASK,
+                face::TINT_SHIFT, face::TEX_MASK, face::BIOME_SHIFT, face::LIGHT_MASK, face::CORNER_SHIFT,
+            ],
+            "a bit layout changed without the legacy decode changing with it"
+        );
+        assert_eq!(m::bits::TINT_MASK, tint::MASK);
+
+        let f = face_record([3, 14, 9], 5, 0b10_01_11_00, 7, 1234, 42, [0x1234, 0xFFFF, 0, 0xABCD]);
+        let c = m::corners(&f);
+        assert_eq!(c[0].texture, 1234);
+        assert_eq!(c[0].biome, 42);
+        assert_eq!(c[0].tint, 7);
+        assert_eq!(c[0].dir, 5);
+        // The flip the shader tests (a0 + a2 = 1 against a1 + a3 = 5) rotates the corners one
+        // along, so the record's corner 1 comes out first and its corner 0 last.
+        let turned = weft_abi::FACE_CORNERS[5][1];
+        assert_eq!(c[0].local, [3.0 + turned[0] as f32, 14.0 + turned[1] as f32, 9.0 + turned[2] as f32]);
+        assert_eq!(c[0].uv, m::UVS[1]);
+        assert_eq!(c[3].uv, m::UVS[0]);
+        assert_eq!(c[0].light, [4.0 / 15.0, 3.0 / 15.0, 2.0 / 15.0, 1.0 / 15.0], "the low word of corner 0's pair");
+        assert_eq!(c[2].light, [13.0 / 15.0, 12.0 / 15.0, 11.0 / 15.0, 10.0 / 15.0], "the high word of corner 3's pair");
+
+        let shader = |file: &str| {
+            std::fs::read_to_string(format!("{}/assets/shaders/{file}", env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{file}: {e}"))
+        };
+        // The tables as the shader writes them, rather than as a copy of them.
+        let floats = |src: &str, name: &str| -> Vec<f32> {
+            let at = src
+                .find(&format!("{name}: array<"))
+                .unwrap_or_else(|| panic!("{name} is not in the shader text"));
+            let declared = at + src[at..].find("= array<").unwrap() + "= array<".len();
+            let open = src[declared..].find('(').unwrap() + declared + 1;
+            let close = src[open..].find(");").unwrap() + open;
+            let mut out = Vec::new();
+            let mut run = String::new();
+            for ch in src[open..close].chars() {
+                if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+' {
+                    run.push(ch);
+                } else if !run.is_empty() {
+                    if let Ok(v) = run.parse::<f32>() {
+                        out.push(v);
+                    }
+                    run.clear();
+                }
+            }
+            out
+        };
+        let (common, world) = (shader("common.wgsl"), shader("world.wgsl"));
+        assert_eq!(floats(&common, "SHADE"), m::SHADE.to_vec(), "the direction shades the shader multiplies by");
+        assert_eq!(floats(&world, "AO"), m::AO.to_vec(), "the corner occlusion the shader multiplies by");
+        assert_eq!(floats(&common, "UVS"), m::UVS.iter().flatten().copied().collect::<Vec<f32>>(), "the picture's corners");
+
+        // The bindings a legacy backend copies, and the bytes inside the two uniform records it
+        // reads them from.
+        assert_eq!(
+            [
+                m::world_bind::G, m::world_bind::ORIGINS, m::world_bind::RECORDS, m::world_bind::BIOMES, m::world_bind::TEX_INFO,
+                m::world_bind::FRAMES, m::world_bind::OFFSETS, m::world_bind::GLOW_MAP, m::world_bind::TEX_SHADER, m::world_bind::SCENE,
+                m::world_bind::LOD_MASK, m::world_bind::SOLID,
+            ],
+            [
+                bind::world::G,
+                bind::world::ORIGINS,
+                bind::world::RECORDS,
+                bind::world::BIOMES,
+                bind::world::TEX_INFO,
+                bind::world::FRAMES,
+                bind::world::OFFSETS,
+                bind::world::GLOW_MAP,
+                bind::world::TEX_SHADER,
+                bind::world::SCENE,
+                bind::world::LOD_MASK,
+                bind::world::SOLID,
+            ],
+            "the engine binds a buffer where the legacy decode does not read it"
+        );
+        assert_eq!(
+            [m::globals::CAM_FRAC, m::globals::IDS, m::globals::CAM_CUBE, m::globals::EXTRA, m::globals::SIZE],
+            [
+                std::mem::offset_of!(Globals, cam_frac),
+                std::mem::offset_of!(Globals, ids),
+                std::mem::offset_of!(Globals, cam_cube),
+                std::mem::offset_of!(Globals, extra),
+                std::mem::size_of::<Globals>(),
+            ],
+            "a Globals field the legacy decode reads at the wrong byte"
+        );
+        assert_eq!(
+            [m::scene::VIEW_PROJ, m::scene::FOG_COLOR, m::scene::PARAMS, m::scene::LIGHT, m::scene::SIZE],
+            [
+                std::mem::offset_of!(Scene, view_proj),
+                std::mem::offset_of!(Scene, fog_color),
+                std::mem::offset_of!(Scene, params),
+                std::mem::offset_of!(Scene, light),
+                std::mem::size_of::<Scene>(),
+            ],
+            "a Scene field the legacy decode reads at the wrong byte"
+        );
+        assert_eq!(
+            [
+                m::quad_bits::POS_MASK, m::quad_bits::POS_BITS, m::quad_bits::POS_OFFSET, m::quad_bits::UV_MASK, m::quad_bits::UV_BITS,
+                m::quad_bits::UV_FINE_BITS, m::quad_bits::UV_FINE_LOW_SHIFT, m::quad_bits::UV_FINE_HIGH_SHIFT, m::quad_bits::TINT_SHIFT,
+                m::quad_bits::FLAT, m::quad_bits::WORDS as u32,
+            ],
+            [
+                quad::POS_MASK,
+                quad::POS_BITS,
+                quad::POS_OFFSET,
+                quad::UV_MASK,
+                quad::UV_BITS,
+                quad::UV_FINE_BITS,
+                quad::UV_FINE_LOW_SHIFT,
+                quad::UV_FINE_HIGH_SHIFT,
+                quad::TINT_SHIFT,
+                quad::FLAT,
+                8,
+            ],
+            "a quad layout changed without the legacy decode changing with it"
+        );
+
+        // A quad as the mesher packs it, read back as a legacy backend has to: corners to the
+        // 1/16th, an uv that runs past the picture so its fine bits are used, and a tint byte
+        // whose top bit means do not shade it.
+        let (uvw, on) = quad_uv([0.0, 1.0, 17.375, 16.0], quad::FLAT | 3);
+        let corners = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.5, 0.0], [0.0, 1.5, 0.0]];
+        let cl =
+            [corner_light([1, 2, 3, 4]), corner_light([5, 6, 7, 8]), corner_light([9, 10, 11, 12]), corner_light([13, 14, 15, 15])];
+        let qr = [
+            quad_pos(corners[0]) | on[0],
+            quad_pos(corners[1]) | on[1],
+            quad_pos(corners[2]) | on[2],
+            quad_pos(corners[3]) | on[3],
+            4096 | 7 << face::BIOME_SHIFT,
+            uvw,
+            cl[0] | cl[1] << face::CORNER_SHIFT,
+            cl[2] | cl[3] << face::CORNER_SHIFT,
+        ];
+        let c = m::quad_corners(&qr);
+        assert_eq!((c[0].texture, c[0].biome, c[0].tint), (4096, 7, 3), "the kind without the FLAT bit");
+        assert_eq!(c[0].shade, 1.0, "FLAT, whatever the normal says");
+        assert_eq!(c[2].local, [1.0, 1.5, 0.0], "a corner to the 1/16th, past the cube's face");
+        assert_eq!(c[0].uv, [0.0, 1.0], "u0, v1");
+        assert_eq!(c[2].uv, [17.375 / 16.0, 1.0 / 16.0], "the fine 1/8ths the corner words carry");
+        assert_eq!(c[1].light, [5.0 / 15.0, 6.0 / 15.0, 7.0 / 15.0, 8.0 / 15.0], "a quad's light is a face's");
+    }
+
     /// The terrain prelude parses, and the header has room for every seed.
     #[test]
     fn terrain_prelude() {

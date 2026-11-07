@@ -5297,6 +5297,7 @@ dependencies = [
  "bytemuck",
  "naga",
  "raw-window-handle",
+ "weft_abi",
  "weft_noise",
 ]
 
