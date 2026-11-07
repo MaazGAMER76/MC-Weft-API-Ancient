@@ -10,8 +10,8 @@ use weft_render::mesh::{self, globals, scene, world_bind, Cam, Geometry, Kind, R
 use weft_render::{
     Atlas, Blend, BufferId, Cmd, CommandList, Error, F32S_PER_VERTEX, PipelineDesc, PipelineId, Rect, Target,
 };
-use windows::core::{w, HRESULT, PCSTR};
-use windows::Win32::Foundation::{HMODULE, BOOL, RECT};
+use windows::core::{w, BOOL, HRESULT, PCSTR};
+use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
 use windows::Win32::Graphics::Direct3D10::*;
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -154,6 +154,7 @@ fn compile(f: CompileFn, source: &str, entry: PCSTR, target: PCSTR) -> Result<Ve
     Ok(unsafe { std::slice::from_raw_parts(code.GetBufferPointer() as *const u8, code.GetBufferSize()) }.to_vec())
 }
 
+#[derive(Clone)]
 struct Pipe {
     kind: Kind,
     alpha_mode: i32,
@@ -306,7 +307,7 @@ impl World {
             Format: format,
             InputSlot: 0,
             AlignedByteOffset: offset,
-            InputSlotClass: D3D10_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+            InputSlotClass: D3D10_INPUT_PER_VERTEX_DATA,
             InstanceDataStepRate: 0,
         };
         let elements = [
@@ -527,7 +528,7 @@ impl World {
                     surface = false;
                     pipe = None;
                 }
-                Cmd::SetPipeline(id) => pipe = self.pipes.get(&id),
+                Cmd::SetPipeline(id) => pipe = self.pipes.get(&id).cloned(),
                 Cmd::BindBuffer { binding, buffer, offset, size } => {
                     if let Some(slot) = bound.get_mut(binding as usize) {
                         *slot = Binding { buffer: Some(buffer), offset, size };
@@ -537,7 +538,7 @@ impl World {
                     self.device.RSSetScissorRects(Some(&[RECT { left: x, top: y, right: x + w as i32, bottom: y + h as i32 }]));
                 },
                 Cmd::DrawIndexedIndirect { buffer, offset, count } if surface => {
-                    let Some(pipe) = pipe else { continue };
+                    let Some(ref pipe) = pipe else { continue };
                     let args = Binding { buffer: Some(buffer), offset, size: count as u64 * 20 }.bytes(buffers);
                     self.draw_indirect(pipe, &bound, args, buffers);
                 }
