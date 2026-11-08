@@ -64,15 +64,17 @@ Weft ships with its own textures. If Minecraft is installed through the official
 
 The engine's modern renderer uses bindless textures, storage buffers and indirect draws, which OpenGL 2.1 and D3D10 hardware cannot do. This fork adds two legacy backends that draw the same world a different way: the engine's face records are decoded on the CPU into plain vertex arrays, every block texture is packed into a single atlas, and the shaders are plain GLSL 120 / HLSL 4.0. Lighting, biome tint blending, fog and animated textures work the same as on the modern path, at the textures' original resolution.
 
-- **OpenGL 2.1** (`gl21`) — the default in the shipped zip; works on Ironlake's Windows 10 driver.
-- **Direct3D 10** (`d3d10`) — the same world path through feature level 10_0, for machines where the GL driver is the weak side.
+- **Direct3D 10** (`d3d10`) — the default in the shipped zip. On Ironlake's Windows 10 driver this is the fast path: the same 120k-face scene measures ~21 fps (frame p99 ~61 ms) here, versus ~2 fps through OpenGL.
+- **OpenGL 2.1** (`gl21`) — the same world path for machines whose D3D10 driver is the weak side. On Ironlake under Windows 10 the GL driver behaves as a slow translation layer, so prefer `d3d10` on this GPU.
 - **CPU** (`cpu`) — last-resort software fallback so the game always starts.
 
-If the chosen renderer cannot start, the game tries the others in order (D3D10, GL 2.1, CPU) instead of giving up. Pick one explicitly with `--render gl21`, `--render d3d10` or `--render cpu`, or change `renderer = "gl21"` in `run/config/render.toml`. `--render-select` shows a chooser at startup.
+If the chosen renderer cannot start, the game tries the others in order (D3D10, GL 2.1, CPU) instead of giving up. Pick one explicitly with `--render d3d10`, `--render gl21` or `--render cpu`, or change `renderer = "d3d10"` in `run/config/render.toml`. `--render-select` shows a chooser at startup.
 
 Useful flags for older machines: `--view 4` (shorter view distance), `--size 1366x768` (window size), `--no-vsync`. To boot straight into a world without menus: `weft.exe --world myworld --seed 1`.
 
 Status of the legacy path: the world renders — block faces and free quads (terrain, trees, plants, flowers) with lighting, biome tint blending, fog and animated textures. Entities, items, the UI, particles, hand and sky passes are still being ported, so on a legacy renderer the game is currently best started with `--world` as above. The modern Vulkan path (source build) renders everything.
+
+Measured on the reference machine (i3 M 380, Ironlake HD Graphics, 4 GB, Windows 10), standing in a fully loaded 120k-face scene at `--view 2`: the D3D10 path holds **~21 fps, frame average ~47 ms, p99 ~61 ms**, while the OpenGL 2.1 path on the same scene manages only ~2 fps because Intel's Windows 10 Ironlake GL driver is a slow translation layer. That is why the zip defaults to `d3d10`. Decoded world geometry is cached per draw by a content hash of each run's record bytes, so a steady view skips CPU re-decode and buffer re-upload; only genuinely changed meshes (and the animation clock for water/lava) are rebuilt. Textures stay at their original resolution with nearest-neighbour filtering — no resolution or texture-quality reduction is used to reach this frame rate.
 
 ## Controls
 
