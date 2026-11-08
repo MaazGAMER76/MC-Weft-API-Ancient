@@ -13,17 +13,19 @@ attribute vec2 a_uv;
 attribute vec3 a_color;
 attribute vec4 a_light;
 uniform mat4 view_proj;
+uniform vec3 cam_offset;
 varying vec2 uv;
 varying vec3 color;
 varying vec4 light;
 varying float dist;
 void main() {
-    gl_Position = view_proj * vec4(a_pos, 1.0);
+    vec3 p = a_pos + cam_offset;
+    gl_Position = view_proj * vec4(p, 1.0);
     gl_Position.z = 2.0 * gl_Position.z - gl_Position.w;
     uv = a_uv;
     color = a_color;
     light = a_light;
-    dist = length(a_pos);
+    dist = length(p);
 }
 "#;
 
@@ -72,6 +74,7 @@ void main() {
 struct Program {
     id: u32,
     view_proj: i32,
+    cam_offset: i32,
     atlas: i32,
     alpha_mode: i32,
     fog_color: i32,
@@ -185,6 +188,28 @@ fn rgb(c: u32) -> [f32; 3] {
     [((c >> 16) & 255) as f32 / 255.0, ((c >> 8) & 255) as f32 / 255.0, (c & 255) as f32 / 255.0]
 }
 
+/// One indirect draw's place in the cache: the args it reads and the pipeline that draws it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Slot {
+    buffer: BufferId,
+    offset: u64,
+    count: u32,
+    quads: bool,
+    alpha: i32,
+}
+
+/// A command's decoded geometry, kept on the GPU until its inputs change. `cube` is the camera
+/// cube it was decoded against; a later frame translates it by `cam_offset` instead of rebuilding.
+#[derive(Clone, Copy)]
+struct Cached {
+    vbo: u32,
+    ibo: u32,
+    key: u64,
+    cube: [i32; 3],
+    indices: i32,
+    used: u64,
+}
+
 pub struct World {
     gl: Gl,
     program: Program,
@@ -194,8 +219,9 @@ pub struct World {
     max_sheet: u32,
     sheet: u32,
     dirty: bool,
-    vbo: u32,
-    ibo: u32,
+    atlas_gen: u64,
+    cache: HashMap<Slot, Cached>,
+    frame_no: u64,
     geo: Geometry,
 }
 
@@ -214,17 +240,17 @@ impl World {
         let program = Program {
             id,
             view_proj: location(c"view_proj"),
+            cam_offset: location(c"cam_offset"),
             atlas: location(c"atlas"),
             alpha_mode: location(c"alpha_mode"),
             fog_color: location(c"fog_color"),
             fog_range: location(c"fog_range"),
             weather: location(c"weather"),
         };
-        let (mut sheet, mut buffers, mut max_sheet) = (0, [0; 2], 0);
+        let (mut sheet, mut max_sheet) = (0, 0);
         unsafe {
             glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mut max_sheet);
             glGenTextures(1, &mut sheet);
-            (gl.glGenBuffers)(2, buffers.as_mut_ptr());
             (gl.glActiveTexture)(gl::TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, sheet);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST as i32);
@@ -236,7 +262,7 @@ impl World {
         Ok(Self {
             gl, program, pipes: HashMap::new(), next_pipeline: 1,
             atlas: Atlas::new(1024.min(max_sheet)), max_sheet, sheet, dirty: true,
-            vbo: buffers[0], ibo: buffers[1], geo: Geometry::default(),
+            atlas_gen: 0, cache: HashMap::new(), frame_no: 0, geo: Geometry::default(),
         })
     }
 
@@ -244,7 +270,9 @@ impl World {
         unsafe {
             (self.gl.glDeleteProgram)(self.program.id);
             glDeleteTextures(1, &self.sheet);
-            (self.gl.glDeleteBuffers)(2, [self.vbo, self.ibo].as_ptr());
+            for c in self.cache.values() {
+                (self.gl.glDeleteBuffers)(2, [c.vbo, c.ibo].as_ptr());
+            }
         }
     }
 
@@ -273,6 +301,7 @@ impl World {
     }
 
     pub fn texture(&mut self, id: u32, width: u32, height: u32, rgba: &[u8]) -> Result<(), Error> {
+        self.atlas_gen += 1;
         if width == 0 || height == 0 || width.saturating_add(2) > self.max_sheet || height.saturating_add(2) > self.max_sheet {
             return Err(Error(format!("texture {id}: {width}x{height} exceeds atlas limit {}", self.max_sheet)));
         }
@@ -292,6 +321,7 @@ impl World {
 
     pub fn remove_texture(&mut self, id: u32) {
         self.atlas.remove(id);
+        self.atlas_gen += 1;
         self.dirty = true;
     }
 
@@ -335,11 +365,23 @@ impl World {
                 Cmd::DrawIndexedIndirect { buffer, offset, count } if surface => {
                     let Some(pipe) = pipe else { continue };
                     let args = Binding { buffer: Some(buffer), offset, size: count as u64 * 20 }.bytes(buffers);
-                    self.draw_indirect(pipe, &bound, args, buffers);
+                    let slot = Slot { buffer, offset, count, quads: matches!(pipe.kind, Kind::Quads), alpha: pipe.alpha_mode };
+                    self.draw_indirect(pipe, slot, &bound, args, buffers);
                 }
                 _ => {}
             }
         }
+        self.frame_no += 1;
+        let cutoff = self.frame_no.saturating_sub(64);
+        let gl = &self.gl;
+        self.cache.retain(|_, c| {
+            if c.used < cutoff {
+                unsafe { (gl.glDeleteBuffers)(2, [c.vbo, c.ibo].as_ptr()) };
+                false
+            } else {
+                true
+            }
+        });
         unsafe {
             for i in 0..4 { (self.gl.glDisableVertexAttribArray)(i); }
             (self.gl.glUseProgram)(0);
@@ -348,7 +390,7 @@ impl World {
         }
     }
 
-    fn draw_indirect(&mut self, pipe: Pipe, bound: &[Binding; 12], args: &[u8], buffers: &HashMap<BufferId, Vec<u8>>) {
+    fn draw_indirect(&mut self, pipe: Pipe, slot: Slot, bound: &[Binding; 12], args: &[u8], buffers: &HashMap<BufferId, Vec<u8>>) {
         let bytes = |binding: u32| bound[binding as usize].bytes(buffers);
         let tables = Tables {
             g: bytes(world_bind::G), scene: bytes(world_bind::SCENE), biomes: bytes(world_bind::BIOMES),
@@ -359,23 +401,55 @@ impl World {
             cube: std::array::from_fn(|i| word(tables.g, globals::CAM_CUBE / 4 + i) as i32),
             frac: std::array::from_fn(|i| float(tables.g, globals::CAM_FRAC / 4 + i)),
         };
-        self.geo.clear();
-        let mut sheet = Sheet { atlas: &self.atlas, tables };
-        for i in 0..args.len() / 20 {
-            let Some(draw) = mesh::draw_at(args, i) else { continue };
-            for instance in 0..word(args, i * 5 + 1) {
-                let mut draw = draw;
-                draw.origin += instance as usize;
-                self.geo.push_run(pipe.kind, draw, bytes(world_bind::RECORDS), bytes(world_bind::ORIGINS), bytes(world_bind::OFFSETS), cam, &mut sheet);
+        let records = bytes(world_bind::RECORDS);
+        let origins = bytes(world_bind::ORIGINS);
+        let offsets = bytes(world_bind::OFFSETS);
+        let key = self.command_key(pipe.kind, args, records, origins, offsets, cam.cube, bound[world_bind::RECORDS as usize].buffer, &tables);
+        let cached = match self.cache.get(&slot).copied().filter(|c| c.key == key) {
+            Some(c) => c,
+            None => {
+                // Decode against this cube with no fractional part; the shader adds `cam_offset`
+                // each frame, so walking (and crossing cube borders) reuses this geometry.
+                self.geo.clear();
+                let mut sheet = Sheet { atlas: &self.atlas, tables };
+                let cam0 = Cam { cube: cam.cube, frac: [0.0; 3] };
+                for i in 0..args.len() / 20 {
+                    let Some(draw) = mesh::draw_at(args, i) else { continue };
+                    for instance in 0..word(args, i * 5 + 1) {
+                        let mut draw = draw;
+                        draw.origin += instance as usize;
+                        self.geo.push_run(pipe.kind, draw, records, origins, offsets, cam0, &mut sheet);
+                    }
+                }
+                if self.geo.indices.is_empty() { self.cache.remove(&slot); return; }
+                let (vbo, ibo) = match self.cache.get(&slot) {
+                    Some(c) => (c.vbo, c.ibo),
+                    None => {
+                        let mut b = [0u32; 2];
+                        unsafe { (self.gl.glGenBuffers)(2, b.as_mut_ptr()) };
+                        (b[0], b[1])
+                    }
+                };
+                unsafe {
+                    (self.gl.glBindBuffer)(gl::ARRAY_BUFFER, vbo);
+                    (self.gl.glBufferData)(gl::ARRAY_BUFFER, (self.geo.vertices.len() * 4) as isize, self.geo.vertices.as_ptr().cast(), gl::STATIC_DRAW);
+                    (self.gl.glBindBuffer)(gl::ELEMENT_ARRAY_BUFFER, ibo);
+                    (self.gl.glBufferData)(gl::ELEMENT_ARRAY_BUFFER, (self.geo.indices.len() * 4) as isize, self.geo.indices.as_ptr().cast(), gl::STATIC_DRAW);
+                }
+                let c = Cached { vbo, ibo, key, cube: cam.cube, indices: self.geo.indices.len() as i32, used: self.frame_no };
+                self.cache.insert(slot, c);
+                c
             }
-        }
-        if self.geo.indices.is_empty() { return; }
+        };
+        if let Some(c) = self.cache.get_mut(&slot) { c.used = self.frame_no; }
+        let off: [f32; 3] = std::array::from_fn(|a| (cached.cube[a] - cam.cube[a]) as f32 * 16.0 - cam.frac[a]);
         let gl = &self.gl;
         let p = &self.program;
         let matrix: [f32; 16] = std::array::from_fn(|i| float(tables.scene, i));
         unsafe {
             (gl.glUseProgram)(p.id);
             (gl.glUniformMatrix4fv)(p.view_proj, 1, 0, matrix.as_ptr());
+            (gl.glUniform3f)(p.cam_offset, off[0], off[1], off[2]);
             (gl.glUniform1i)(p.atlas, 0);
             (gl.glUniform1i)(p.alpha_mode, pipe.alpha_mode);
             (gl.glUniform2f)(p.fog_range, float(tables.scene, scene::PARAMS / 4), float(tables.scene, scene::PARAMS / 4 + 1));
@@ -383,17 +457,53 @@ impl World {
             (gl.glUniform3f)(p.weather, float(tables.scene, scene::PARAMS / 4 + 2), float(tables.scene, scene::LIGHT / 4), float(tables.scene, scene::LIGHT / 4 + 1));
             (gl.glActiveTexture)(gl::TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, self.sheet);
-            (gl.glBindBuffer)(gl::ARRAY_BUFFER, self.vbo);
-            (gl.glBufferData)(gl::ARRAY_BUFFER, (self.geo.vertices.len() * 4) as isize, self.geo.vertices.as_ptr().cast(), gl::STREAM_DRAW);
-            (gl.glBindBuffer)(gl::ELEMENT_ARRAY_BUFFER, self.ibo);
-            (gl.glBufferData)(gl::ELEMENT_ARRAY_BUFFER, (self.geo.indices.len() * 4) as isize, self.geo.indices.as_ptr().cast(), gl::STREAM_DRAW);
+            (gl.glBindBuffer)(gl::ARRAY_BUFFER, cached.vbo);
             for (i, (size, offset)) in [(3, 0), (2, 12), (3, 20), (4, 32)].into_iter().enumerate() {
                 (gl.glEnableVertexAttribArray)(i as u32);
                 (gl.glVertexAttribPointer)(i as u32, size, GL_FLOAT, 0, (F32S_PER_VERTEX * 4) as i32, offset as *const c_void);
             }
+            (gl.glBindBuffer)(gl::ELEMENT_ARRAY_BUFFER, cached.ibo);
             set_state(pipe);
-            glDrawElements(GL_TRIANGLES, self.geo.indices.len() as i32, GL_UNSIGNED_INT, std::ptr::null());
+            glDrawElements(GL_TRIANGLES, cached.indices, GL_UNSIGNED_INT, std::ptr::null());
         }
+    }
+
+    /// A camera-independent fingerprint of everything a command decodes: the run records, their
+    /// absolute cube, any body they ride, and the animation frame of each texture they sample.
+    /// Equal keys mean the cached geometry is still exactly what this command would decode.
+    fn command_key(&self, kind: Kind, args: &[u8], records: &[u8], origins: &[u8], offsets: &[u8], cam_cube: [i32; 3], records_id: Option<BufferId>, tables: &Tables) -> u64 {
+        let mut h = mesh::mix(0xcbf2_9ce4_8422_2325, kind as u64);
+        h = mesh::mix(h, self.atlas_gen);
+        h = mesh::mix(h, records_id.map_or(0, |b| b.0 as u64));
+        let words = match kind { Kind::Faces => 4usize, Kind::Quads => 8 };
+        let tex_word = match kind { Kind::Faces => 1usize, Kind::Quads => 4 };
+        for i in 0..args.len() / 20 {
+            let Some(draw) = mesh::draw_at(args, i) else { continue };
+            for instance in 0..word(args, i * 5 + 1) {
+                let Some(origin) = mesh::origin_at(origins, draw.origin + instance as usize) else { continue };
+                h = mesh::mix(h, draw.faces as u64);
+                h = mesh::mix(h, draw.records as u64);
+                for a in 0..3 {
+                    h = mesh::mix(h, origin.cube[a].wrapping_add(cam_cube[a]) as i64 as u64);
+                }
+                h = mesh::mix(h, origin.body as i64 as u64);
+                if origin.body != 0 {
+                    if let Some(off) = mesh::offset_at(offsets, origin.body as usize) {
+                        for v in off.at { h = mesh::mix(h, v.to_bits() as u64); }
+                        h = mesh::mix(h, off.light as u64);
+                    }
+                }
+                let start = draw.records * words * 4;
+                let end = start + draw.faces as usize * words * 4;
+                let Some(range) = records.get(start..end) else { continue };
+                h = mesh::hash_bytes(h, range);
+                for f in 0..draw.faces as usize {
+                    let tex = word(range, f * words + tex_word) & mesh::bits::TEX_MASK;
+                    h = mesh::mix(h, tables.frame(tex) as u64);
+                }
+            }
+        }
+        h
     }
 
     fn upload_sheet(&mut self) {

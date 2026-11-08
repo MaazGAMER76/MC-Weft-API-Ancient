@@ -29,6 +29,7 @@ cbuffer Frame : register(b0) {
     float4 fog_color;
     float4 params;
     float4 light;
+    float4 cam_offset;
     int alpha_mode;
     int3 pad;
 };
@@ -47,12 +48,13 @@ struct Out {
 };
 Out vs_main(In i) {
     Out o;
+    float3 p = i.pos + cam_offset.xyz;
     // The matrix arrives column-major (glam to_cols_array_2d), so the vector goes on the left.
-    o.pos = mul(float4(i.pos, 1.0), view_proj);
+    o.pos = mul(float4(p, 1.0), view_proj);
     o.uv = i.uv;
     o.color = i.color;
     o.light = i.light;
-    o.dist = length(i.pos);
+    o.dist = length(p);
     return o;
 }
 "#;
@@ -63,6 +65,7 @@ cbuffer Frame : register(b0) {
     float4 fog_color;
     float4 params;
     float4 light;
+    float4 cam_offset;
     int alpha_mode;
     int3 pad;
 };
@@ -260,6 +263,30 @@ fn rgb(c: u32) -> [f32; 3] {
     [((c >> 16) & 255) as f32 / 255.0, ((c >> 8) & 255) as f32 / 255.0, (c & 255) as f32 / 255.0]
 }
 
+/// One indirect draw's place in the cache: the args it reads and the pipeline that draws it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Slot {
+    buffer: BufferId,
+    offset: u64,
+    count: u32,
+    quads: bool,
+    alpha: i32,
+}
+
+/// A command's decoded geometry, kept on the GPU until its inputs change. `cube` is the camera
+/// cube it was decoded against; a later frame translates it by `cam_offset` instead of rebuilding.
+#[derive(Clone)]
+struct Cached {
+    vbo: ID3D10Buffer,
+    ibo: ID3D10Buffer,
+    vbo_cap: usize,
+    ibo_cap: usize,
+    key: u64,
+    cube: [i32; 3],
+    indices: u32,
+    used: u64,
+}
+
 pub struct World {
     device: ID3D10Device,
     _compiler: HMODULE,
@@ -277,10 +304,9 @@ pub struct World {
     sheet_view: Option<ID3D10ShaderResourceView>,
     sheet_size: u32,
     dirty: bool,
-    vbo: Option<ID3D10Buffer>,
-    vbo_cap: usize,
-    ibo: Option<ID3D10Buffer>,
-    ibo_cap: usize,
+    atlas_gen: u64,
+    cache: HashMap<Slot, Cached>,
+    frame_no: u64,
     geo: Geometry,
 }
 
@@ -349,7 +375,7 @@ impl World {
         unsafe {
             device.CreateBuffer(
                 &D3D10_BUFFER_DESC {
-                    ByteWidth: 128,
+                    ByteWidth: 144,
                     Usage: D3D10_USAGE_DEFAULT,
                     BindFlags: D3D10_BIND_CONSTANT_BUFFER.0 as u32,
                     CPUAccessFlags: 0,
@@ -379,10 +405,9 @@ impl World {
             sheet_view: None,
             sheet_size: 0,
             dirty: true,
-            vbo: None,
-            vbo_cap: 0,
-            ibo: None,
-            ibo_cap: 0,
+            atlas_gen: 0,
+            cache: HashMap::new(),
+            frame_no: 0,
             geo: Geometry::default(),
         })
     }
@@ -471,6 +496,7 @@ impl World {
     }
 
     pub fn texture(&mut self, id: u32, width: u32, height: u32, rgba: &[u8]) -> Result<(), Error> {
+        self.atlas_gen += 1;
         if width == 0 || height == 0 || width.saturating_add(2) > self.max_sheet || height.saturating_add(2) > self.max_sheet {
             return Err(Error(format!("texture {id}: {width}x{height} exceeds atlas limit {}", self.max_sheet)));
         }
@@ -489,6 +515,7 @@ impl World {
 
     pub fn remove_texture(&mut self, id: u32) {
         self.atlas.remove(id);
+        self.atlas_gen += 1;
         self.dirty = true;
     }
 
@@ -540,11 +567,15 @@ impl World {
                 Cmd::DrawIndexedIndirect { buffer, offset, count } if surface => {
                     let Some(ref pipe) = pipe else { continue };
                     let args = Binding { buffer: Some(buffer), offset, size: count as u64 * 20 }.bytes(buffers);
-                    self.draw_indirect(pipe, &bound, args, buffers);
+                    let slot = Slot { buffer, offset, count, quads: matches!(pipe.kind, Kind::Quads), alpha: pipe.alpha_mode };
+                    self.draw_indirect(pipe, slot, &bound, args, buffers);
                 }
                 _ => {}
             }
         }
+        self.frame_no += 1;
+        let cutoff = self.frame_no.saturating_sub(64);
+        self.cache.retain(|_, c| c.used >= cutoff);
         unsafe {
             self.device.IASetInputLayout(None::<&ID3D10InputLayout>);
             self.device.VSSetShader(None::<&ID3D10VertexShader>);
@@ -553,7 +584,7 @@ impl World {
         }
     }
 
-    fn draw_indirect(&mut self, pipe: &Pipe, bound: &[Binding; 12], args: &[u8], buffers: &HashMap<BufferId, Vec<u8>>) {
+    fn draw_indirect(&mut self, pipe: &Pipe, slot: Slot, bound: &[Binding; 12], args: &[u8], buffers: &HashMap<BufferId, Vec<u8>>) {
         let bytes = |binding: u32| bound[binding as usize].bytes(buffers);
         let tables = Tables {
             g: bytes(world_bind::G),
@@ -569,67 +600,80 @@ impl World {
             cube: std::array::from_fn(|i| word(tables.g, globals::CAM_CUBE / 4 + i) as i32),
             frac: std::array::from_fn(|i| float(tables.g, globals::CAM_FRAC / 4 + i)),
         };
-        self.geo.clear();
-        let mut sheet = Sheet { atlas: &self.atlas, tables };
-        for i in 0..args.len() / 20 {
-            let Some(draw) = mesh::draw_at(args, i) else { continue };
-            for instance in 0..word(args, i * 5 + 1) {
-                let mut draw = draw;
-                draw.origin += instance as usize;
-                self.geo.push_run(pipe.kind, draw, bytes(world_bind::RECORDS), bytes(world_bind::ORIGINS), bytes(world_bind::OFFSETS), cam, &mut sheet);
+        let records = bytes(world_bind::RECORDS);
+        let origins = bytes(world_bind::ORIGINS);
+        let offsets = bytes(world_bind::OFFSETS);
+        let key = self.command_key(pipe.kind, args, records, origins, offsets, cam.cube, bound[world_bind::RECORDS as usize].buffer, &tables);
+        let cached = match self.cache.get(&slot).filter(|c| c.key == key).cloned() {
+            Some(c) => c,
+            None => {
+                // Decode against this cube with no fractional part; the shader adds `cam_offset`
+                // each frame, so walking (and crossing cube borders) reuses this geometry.
+                self.geo.clear();
+                let mut sheet = Sheet { atlas: &self.atlas, tables };
+                let cam0 = Cam { cube: cam.cube, frac: [0.0; 3] };
+                for i in 0..args.len() / 20 {
+                    let Some(draw) = mesh::draw_at(args, i) else { continue };
+                    for instance in 0..word(args, i * 5 + 1) {
+                        let mut draw = draw;
+                        draw.origin += instance as usize;
+                        self.geo.push_run(pipe.kind, draw, records, origins, offsets, cam0, &mut sheet);
+                    }
+                }
+                if self.geo.indices.is_empty() {
+                    self.cache.remove(&slot);
+                    return;
+                }
+                let vbytes = self.geo.vertices.len() * 4;
+                let ibytes = self.geo.indices.len() * 4;
+                let prev = self.cache.get(&slot).cloned();
+                let (vbo, vbo_cap) = match &prev {
+                    Some(c) if c.vbo_cap >= vbytes => (c.vbo.clone(), c.vbo_cap),
+                    _ => match self.make_buffer(vbytes, D3D10_BIND_VERTEX_BUFFER) {
+                        Ok(b) => (b, vbytes),
+                        Err(e) => { eprintln!("D3D10: vertex buffer: {e}"); return; }
+                    },
+                };
+                let (ibo, ibo_cap) = match &prev {
+                    Some(c) if c.ibo_cap >= ibytes => (c.ibo.clone(), c.ibo_cap),
+                    _ => match self.make_buffer(ibytes, D3D10_BIND_INDEX_BUFFER) {
+                        Ok(b) => (b, ibytes),
+                        Err(e) => { eprintln!("D3D10: index buffer: {e}"); return; }
+                    },
+                };
+                unsafe {
+                    self.device.UpdateSubresource(&vbo, 0, None, self.geo.vertices.as_ptr().cast(), 0, 0);
+                    self.device.UpdateSubresource(&ibo, 0, None, self.geo.indices.as_ptr().cast(), 0, 0);
+                }
+                let c = Cached { vbo, ibo, vbo_cap, ibo_cap, key, cube: cam.cube, indices: self.geo.indices.len() as u32, used: self.frame_no };
+                self.cache.insert(slot, c.clone());
+                c
             }
-        }
-        if self.geo.indices.is_empty() {
-            return;
-        }
+        };
+        if let Some(c) = self.cache.get_mut(&slot) { c.used = self.frame_no; }
         let Some(view) = self.sheet_view.clone() else { return };
-        let vbytes = self.geo.vertices.len() * 4;
-        let ibytes = self.geo.indices.len() * 4;
-        if self.vbo_cap < vbytes {
-            match self.make_buffer(vbytes, D3D10_BIND_VERTEX_BUFFER) {
-                Ok(buffer) => {
-                    self.vbo = Some(buffer);
-                    self.vbo_cap = vbytes;
-                }
-                Err(e) => {
-                    eprintln!("D3D10: vertex buffer: {e}");
-                    return;
-                }
-            }
-        }
-        if self.ibo_cap < ibytes {
-            match self.make_buffer(ibytes, D3D10_BIND_INDEX_BUFFER) {
-                Ok(buffer) => {
-                    self.ibo = Some(buffer);
-                    self.ibo_cap = ibytes;
-                }
-                Err(e) => {
-                    eprintln!("D3D10: index buffer: {e}");
-                    return;
-                }
-            }
-        }
-        let (Some(vbo), Some(ibo)) = (self.vbo.clone(), self.ibo.clone()) else { return };
+        let off: [f32; 3] = std::array::from_fn(|a| (cached.cube[a] - cam.cube[a]) as f32 * 16.0 - cam.frac[a]);
         // The constant buffer mirrors the Scene prefix the shaders read: matrix, fog colour,
-        // params, light, then the alpha mode this pipeline draws with.
-        let mut frame = [0u8; 128];
+        // params, light, then the camera offset and the alpha mode this pipeline draws with.
+        let mut frame = [0u8; 144];
         frame[0..64].copy_from_slice(&tables.scene[0..64]);
         frame[64..80].copy_from_slice(&tables.scene[scene::FOG_COLOR..scene::FOG_COLOR + 16]);
         frame[80..96].copy_from_slice(&tables.scene[scene::PARAMS..scene::PARAMS + 16]);
         frame[96..112].copy_from_slice(&tables.scene[scene::LIGHT..scene::LIGHT + 16]);
-        frame[112..116].copy_from_slice(&pipe.alpha_mode.to_le_bytes());
+        for a in 0..3 {
+            frame[112 + a * 4..116 + a * 4].copy_from_slice(&off[a].to_le_bytes());
+        }
+        frame[128..132].copy_from_slice(&pipe.alpha_mode.to_le_bytes());
         unsafe {
-            self.device.UpdateSubresource(&vbo, 0, None, self.geo.vertices.as_ptr().cast(), 0, 0);
-            self.device.UpdateSubresource(&ibo, 0, None, self.geo.indices.as_ptr().cast(), 0, 0);
             self.device.UpdateSubresource(&self.cb, 0, None, frame.as_ptr().cast(), 0, 0);
             self.device.IASetInputLayout(Some(&self.layout));
             self.device.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            let vertex_buffers = [Some(vbo)];
+            let vertex_buffers = [Some(cached.vbo.clone())];
             let strides = [(F32S_PER_VERTEX * 4) as u32];
             let offsets = [0u32];
             self.device
                 .IASetVertexBuffers(0, 1, Some(vertex_buffers.as_ptr()), Some(strides.as_ptr()), Some(offsets.as_ptr()));
-            self.device.IASetIndexBuffer(Some(&ibo), DXGI_FORMAT_R32_UINT, 0);
+            self.device.IASetIndexBuffer(Some(&cached.ibo), DXGI_FORMAT_R32_UINT, 0);
             self.device.VSSetShader(Some(&self.vs));
             self.device.PSSetShader(Some(&self.ps));
             self.device.VSSetConstantBuffers(0, Some(&[Some(self.cb.clone())]));
@@ -639,8 +683,46 @@ impl World {
             self.device.OMSetBlendState(&pipe.blend, &[0.0; 4], 0xFFFFFFFF);
             self.device.OMSetDepthStencilState(Some(&pipe.depth), 0);
             self.device.RSSetState(Some(&pipe.raster));
-            self.device.DrawIndexed(self.geo.indices.len() as u32, 0, 0);
+            self.device.DrawIndexed(cached.indices, 0, 0);
         }
+    }
+
+    /// A camera-independent fingerprint of everything a command decodes: the run records, their
+    /// absolute cube, any body they ride, and the animation frame of each texture they sample.
+    /// Equal keys mean the cached geometry is still exactly what this command would decode.
+    fn command_key(&self, kind: Kind, args: &[u8], records: &[u8], origins: &[u8], offsets: &[u8], cam_cube: [i32; 3], records_id: Option<BufferId>, tables: &Tables) -> u64 {
+        let mut h = mesh::mix(0xcbf2_9ce4_8422_2325, kind as u64);
+        h = mesh::mix(h, self.atlas_gen);
+        h = mesh::mix(h, records_id.map_or(0, |b| b.0 as u64));
+        let words = match kind { Kind::Faces => 4usize, Kind::Quads => 8 };
+        let tex_word = match kind { Kind::Faces => 1usize, Kind::Quads => 4 };
+        for i in 0..args.len() / 20 {
+            let Some(draw) = mesh::draw_at(args, i) else { continue };
+            for instance in 0..word(args, i * 5 + 1) {
+                let Some(origin) = mesh::origin_at(origins, draw.origin + instance as usize) else { continue };
+                h = mesh::mix(h, draw.faces as u64);
+                h = mesh::mix(h, draw.records as u64);
+                for a in 0..3 {
+                    h = mesh::mix(h, origin.cube[a].wrapping_add(cam_cube[a]) as i64 as u64);
+                }
+                h = mesh::mix(h, origin.body as i64 as u64);
+                if origin.body != 0 {
+                    if let Some(off) = mesh::offset_at(offsets, origin.body as usize) {
+                        for v in off.at { h = mesh::mix(h, v.to_bits() as u64); }
+                        h = mesh::mix(h, off.light as u64);
+                    }
+                }
+                let start = draw.records * words * 4;
+                let end = start + draw.faces as usize * words * 4;
+                let Some(range) = records.get(start..end) else { continue };
+                h = mesh::hash_bytes(h, range);
+                for f in 0..draw.faces as usize {
+                    let tex = word(range, f * words + tex_word) & mesh::bits::TEX_MASK;
+                    h = mesh::mix(h, tables.frame(tex) as u64);
+                }
+            }
+        }
+        h
     }
 
     fn make_buffer(&self, bytes: usize, bind: D3D10_BIND_FLAG) -> windows::core::Result<ID3D10Buffer> {

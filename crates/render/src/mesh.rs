@@ -285,6 +285,24 @@ pub fn draw_at(bytes: &[u8], at: usize) -> Option<Draw> {
     Some(Draw { faces: indices / 6, records: offset as usize / 4, origin: word(4)? as usize })
 }
 
+/// Mixes one word into a content hash (the 64-bit FNV prime). A legacy backend keys its
+/// decoded-geometry cache on the bytes a run reads, so a steady view decodes and uploads nothing.
+pub fn mix(h: u64, w: u64) -> u64 {
+    (h ^ w).wrapping_mul(0x1000_0000_01b3)
+}
+
+/// Hashes a byte range a run reads, eight bytes at a time.
+pub fn hash_bytes(mut h: u64, bytes: &[u8]) -> u64 {
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        h = mix(h, u64::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    for &b in chunks.remainder() {
+        h = mix(h, b as u64);
+    }
+    h
+}
+
 /// What a legacy backend has to add from its own tables.
 pub trait Resolve {
     /// Where a texture id's picture is now - animation included - or none if it has no room.

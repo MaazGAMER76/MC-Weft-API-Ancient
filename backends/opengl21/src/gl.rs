@@ -6,6 +6,7 @@ use windows::Win32::Graphics::OpenGL::wglGetProcAddress;
 pub const ARRAY_BUFFER: u32 = 0x8892;
 pub const ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 pub const STREAM_DRAW: u32 = 0x88E0;
+pub const STATIC_DRAW: u32 = 0x88E4;
 pub const VERTEX_SHADER: u32 = 0x8B31;
 pub const FRAGMENT_SHADER: u32 = 0x8B30;
 pub const COMPILE_STATUS: u32 = 0x8B81;
