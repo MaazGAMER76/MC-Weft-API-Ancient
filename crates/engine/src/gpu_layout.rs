@@ -994,14 +994,22 @@ mod tests {
             let close = src[open..].find(");").unwrap() + open;
             let mut out = Vec::new();
             let mut run = String::new();
+            let mut in_ident = false;
             for ch in src[open..close].chars() {
-                if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+' {
-                    run.push(ch);
-                } else if !run.is_empty() {
+                if ch.is_ascii_alphabetic() || ch == '_' {
+                    // Digits inside a type name (`vec2`) are not table values.
+                    in_ident = true;
+                    run.clear();
+                } else if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+' {
+                    if !in_ident {
+                        run.push(ch);
+                    }
+                } else {
                     if let Ok(v) = run.parse::<f32>() {
                         out.push(v);
                     }
                     run.clear();
+                    in_ident = false;
                 }
             }
             // The last value sits right before `)` with no separator, so the loop never flushes it.
