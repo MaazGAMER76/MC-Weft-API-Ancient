@@ -974,7 +974,10 @@ mod tests {
         assert_eq!(c[0].local, [3.0 + turned[0] as f32, 14.0 + turned[1] as f32, 9.0 + turned[2] as f32]);
         assert_eq!(c[0].uv, m::UVS[1]);
         assert_eq!(c[3].uv, m::UVS[0]);
-        assert_eq!(c[0].light, [4.0 / 15.0, 3.0 / 15.0, 2.0 / 15.0, 1.0 / 15.0], "the low word of corner 0's pair");
+        // The flip rotates the light with the corner, as `vs_face` does: c[0] is record corner 1
+        // (the high word of the first pair), and record corner 0's low word wraps around to c[3].
+        assert_eq!(c[0].light, [1.0, 1.0, 1.0, 1.0], "the flipped first corner carries record corner 1's high word");
+        assert_eq!(c[3].light, [4.0 / 15.0, 3.0 / 15.0, 2.0 / 15.0, 1.0 / 15.0], "record corner 0's low word wraps to last");
         assert_eq!(c[2].light, [13.0 / 15.0, 12.0 / 15.0, 11.0 / 15.0, 10.0 / 15.0], "the high word of corner 3's pair");
 
         let shader = |file: &str| {
