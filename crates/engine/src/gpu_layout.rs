@@ -1004,6 +1004,10 @@ mod tests {
                     run.clear();
                 }
             }
+            // The last value sits right before `)` with no separator, so the loop never flushes it.
+            if let Ok(v) = run.parse::<f32>() {
+                out.push(v);
+            }
             out
         };
         let (common, world) = (shader("common.wgsl"), shader("world.wgsl"));
