@@ -29,8 +29,8 @@ struct Row {
 const ROWS: [Row; 5] = [
     Row { label: "1 VULKAN - NOT AVAILABLE", renderer: None, recommended: false },
     Row { label: "2 DX12 - NOT AVAILABLE", renderer: None, recommended: false },
-    Row { label: "3 D3D10 - GPU CLEAR ONLY", renderer: Some(Renderer::DirectX10), recommended: true },
-    Row { label: "4 GL21 - GPU CLEAR ONLY", renderer: Some(Renderer::OpenGl21), recommended: false },
+    Row { label: "3 D3D10 - WORLD RENDERS", renderer: Some(Renderer::DirectX10), recommended: true },
+    Row { label: "4 GL21 - WORLD RENDERS", renderer: Some(Renderer::OpenGl21), recommended: false },
     Row { label: "5 CPU - SKY AND GREEN FRAME", renderer: Some(Renderer::Cpu), recommended: false },
 ];
 
@@ -136,7 +136,7 @@ impl RendererSelector {
             text(&mut buffer, width, height, 25, y + 7, row.label, 2, foreground);
         }
         text(&mut buffer, width, height, 17, 235, "CLICK A ROW OR PRESS ENTER", 1, rgb(196, 209, 207));
-        text(&mut buffer, width, height, 17, 253, "GPU ROWS CLEAR ONLY - CPU SHOWS A TEST FRAME", 1, rgb(206, 176, 120));
+        text(&mut buffer, width, height, 17, 253, "GPU ROWS DRAW THE WORLD - CPU SHOWS A TEST FRAME", 1, rgb(206, 176, 120));
         if let Err(error) = buffer.present() {
             eprintln!("renderer selector: {error}");
         }
