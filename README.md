@@ -72,7 +72,7 @@ If the chosen renderer cannot start, the game tries the others in order (D3D10, 
 
 Useful flags for older machines: `--view 4` (shorter view distance), `--size 1366x768` (window size), `--no-vsync`. To boot straight into a world without menus: `weft.exe --world myworld --seed 1`.
 
-Status of the legacy path: terrain, entities and items render; the UI, particles, hand and sky passes are still being ported, so on a legacy renderer the game is currently best started with `--world` as above. The modern Vulkan path (source build) renders everything.
+Status of the legacy path: the world renders — block faces and free quads (terrain, trees, plants, flowers) with lighting, biome tint blending, fog and animated textures. Entities, items, the UI, particles, hand and sky passes are still being ported, so on a legacy renderer the game is currently best started with `--world` as above. The modern Vulkan path (source build) renders everything.
 
 ## Controls
 
@@ -128,7 +128,7 @@ Copy [`examples/examplemod`](examples/examplemod): every kind of registration is
 
 ## Project status
 
-Early. The mod interface and the save format can still change between versions. A mod built against another engine version refuses to load and asks to be rebuilt rather than crashing. The legacy GL 2.1 / D3D10 backends are newer than the rest: world rendering works, the remaining passes (UI, particles, hand, sky) are being ported, and mesh caching for lower CPU frame times is in progress.
+Early. The mod interface and the save format can still change between versions. A mod built against another engine version refuses to load and asks to be rebuilt rather than crashing. The legacy GL 2.1 / D3D10 backends are newer than the rest: world rendering works, the remaining passes (UI, particles, hand, sky) are being ported, and decoded world geometry is cached per draw so a steady view skips CPU decode and buffer re-upload.
 
 ## Running a server
 
