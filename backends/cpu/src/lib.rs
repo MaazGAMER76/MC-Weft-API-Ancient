@@ -93,6 +93,10 @@ impl Backend for CpuBackend {
         false
     }
 
+    fn supports_ui(&self) -> bool {
+        false
+    }
+
     fn device_name(&self) -> &str {
         "CPU softbuffer - Ironlake DEV_0046 fallback, presents a sky/green frame, draws no geometry"
     }

@@ -8,7 +8,7 @@ use std::ffi::c_void;
 
 use raw_window_handle::RawWindowHandle;
 use weft_render::{
-    Backend, BackendDesc, BufferId, Capture, Cmd, CommandList, ComputeDesc, Error, FrameInfo, PipelineDesc, PipelineId, Target,
+    Backend, BackendDesc, BufferId, Capture, Cmd, CommandList, ComputeDesc, Error, Format, FrameInfo, PipelineDesc, PipelineId, Target,
     TextureDesc, TextureId,
 };
 use windows::Win32::Foundation::HWND;
@@ -185,6 +185,10 @@ impl Backend for Gl21Backend {
         false
     }
 
+    fn supports_ui(&self) -> bool {
+        false
+    }
+
     fn device_name(&self) -> &str {
         &self.adapter
     }
@@ -251,6 +255,14 @@ impl Backend for Gl21Backend {
         }
         let Some(desc) = self.textures.get(&texture) else { return };
         let (width, height) = (desc.width, desc.height);
+        // The atlas stores RGBA only; single-channel masks (font, glow) arrive as one byte/pixel.
+        let expanded;
+        let data = if desc.format == Format::R8Unorm {
+            expanded = data.iter().flat_map(|&v| [v, v, v, 255]).collect::<Vec<_>>();
+            &expanded[..]
+        } else {
+            data
+        };
         if let Err(error) = self.world.texture(texture.0, width, height, data) {
             eprintln!("GL21 renderer: {error}");
         }

@@ -146,9 +146,8 @@ fn main() {
     opts.renderer_config = dirs.config.join("render.toml");
     if opts.renderer.is_none() {
         opts.renderer = read_renderer_config(&opts.renderer_config);
-        if !server && (opts.render_select || opts.renderer.is_none()) {
-            opts.render_select = true;
-        }
+        // Show the selector on every interactive launch; a saved choice must not hide it.
+        opts.render_select = !server && !extra.iter().any(|(k, _)| k == "script" || k == "test");
     } else {
         opts.render_select = false;
     }

@@ -19,6 +19,10 @@ impl Backend for D3d10Backend {
         false
     }
 
+    fn supports_ui(&self) -> bool {
+        false
+    }
+
     fn frames_in_flight(&self) -> usize {
         1
     }

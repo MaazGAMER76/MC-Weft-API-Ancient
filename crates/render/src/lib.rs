@@ -363,6 +363,11 @@ pub trait Backend: Send {
     fn supports_compute(&self) -> bool {
         true
     }
+    /// Whether the backend can draw the GUI (`ui`/`post` WGSL pipelines). Legacy fixed-function
+    /// paths only implement the world pipelines, so menus and HUD would be invisible there.
+    fn supports_ui(&self) -> bool {
+        true
+    }
     /// The GPU in use, for diagnostics.
     fn device_name(&self) -> &str {
         ""

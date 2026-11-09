@@ -504,7 +504,17 @@ impl App {
             bench_last: [0.0; 5],
             bench_line: String::new(),
         };
-        if let Some(world) = &self.opts.world {
+        // Legacy fixed-function backends cannot draw the GUI pipelines, so a title screen would
+        // be an invisible (black) window; boot straight into a world there instead.
+        let world = self.opts.world.clone().or_else(|| {
+            if r.gpu.supports_ui() {
+                None
+            } else {
+                log::info!("legacy renderer: no GUI pipelines; entering a world directly");
+                Some("world".to_string())
+            }
+        });
+        if let Some(world) = &world {
             let saves_dir = r.settings.saves_dir();
             let meta = saves::list(&saves_dir)
                 .into_iter()
